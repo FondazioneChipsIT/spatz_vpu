@@ -17,32 +17,60 @@ package spatz_pkg;
   //////////////////
 
   // Number of IPUs in each VFU (between 1 and 8)
+`ifdef SPATZ_N_IPU
+  localparam int unsigned N_IPU = `SPATZ_N_IPU;
+`else
   localparam int unsigned N_IPU = 1;
+`endif
   // Number of FPUs in each VFU (between 1 and 8)
+`ifdef SPATZ_N_FPU
+  localparam int unsigned N_FPU = `SPATZ_N_FPU;
+`else
   localparam int unsigned N_FPU = 4;
+`endif
   // Number of FUs in each VFU
   localparam int unsigned N_FU  = N_IPU > N_FPU ? N_IPU : N_FPU;
   // FPU support
   localparam bit FPU            = N_FPU != 0;
   // Single-precision floating point support
+`ifdef SPATZ_RVF
+  localparam bit RVF            = `SPATZ_RVF;
+`else
   localparam bit RVF            = 1;
+`endif
   // Double-precision floating-point support
+`ifdef SPATZ_RVD
+  localparam bit RVD            = `SPATZ_RVD;
+`else
   localparam bit RVD            = 1;
+`endif
   // Vector support
+`ifdef SPATZ_RVV
+  localparam bit RVV            = `SPATZ_RVV;
+`else
   localparam bit RVV            = 1;
+`endif
 
   // Maximum size of a single vector element in bits
   localparam int unsigned ELEN   = RVD ? 64 : 32;
   // Maximum size of a single vector element in bytes
   localparam int unsigned ELENB  = ELEN / 8;
   // Number of bits in a vector register
+`ifdef SPATZ_VLEN
+  localparam int unsigned VLEN   = `SPATZ_VLEN;
+`else
   localparam int unsigned VLEN   = 512;
+`endif
   // Number of bytes in a vector register
   localparam int unsigned VLENB  = VLEN / 8;
   // Maximum vector length in elements
   localparam int unsigned MAXVL  = VLEN;
   // Number of vector registers
+`ifdef SPATZ_NRVREG
+  localparam int unsigned NRVREG = `SPATZ_NRVREG;
+`else
   localparam int unsigned NRVREG = 32;
+`endif
 
   // Spatz' data width
   localparam int unsigned DataWidth = ELEN;
@@ -58,7 +86,11 @@ package spatz_pkg;
   // Number of VRF words
   localparam int unsigned NrVRFWords       = NRVREG * NrWordsPerVector;
   // Number of VRF banks
+`ifdef SPATZ_NR_VRF_BANKS
+  localparam int unsigned NrVRFBanks       = `SPATZ_NR_VRF_BANKS;
+`else
   localparam int unsigned NrVRFBanks       = 4;
+`endif
   // Number of elements per VRF Bank
   localparam int unsigned NrWordsPerBank   = NrVRFWords / NrVRFBanks;
 
@@ -75,6 +107,8 @@ package spatz_pkg;
   // at the upstream default of 4.
 `ifdef VENTAGLIO
   localparam int unsigned NrParallelInstructions = 8;
+`elsif SPATZ_NR_PARALLEL_INSTR
+  localparam int unsigned NrParallelInstructions = `SPATZ_NR_PARALLEL_INSTR;
 `else
   localparam int unsigned NrParallelInstructions = 4;
 `endif
@@ -400,8 +434,12 @@ package spatz_pkg;
   //  FPU Configuration  //
   /////////////////////////
 
-  // No support for floating-point division and square-root for now
+  // Floating-point division and square-root support
+`ifdef SPATZ_XDIVSQRT
+  localparam bit FDivSqrt = `SPATZ_XDIVSQRT;
+`else
   localparam bit FDivSqrt = 1'b0;
+`endif
 
   localparam int unsigned FLEN = RVD ? 64 : 32;
 

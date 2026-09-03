@@ -19,6 +19,14 @@ dependencies:
 workspace:
   checkout_dir: "hw/ip"
 
+# The snitch and reqrsp_interface sub-packages are path dependencies inside this
+# git repository; Bender cannot propagate their `export_include_dirs` from there
+# (warning W13), so re-export them from the top-level package. Consumers such as
+# MAGIA need `snitch_vm/typedef.svh` and `reqrsp_interface/typedef.svh`.
+export_include_dirs:
+  - hw/ip/snitch/include
+  - hw/ip/reqrsp_interface/include
+
 sources:
   ## hw/ip/spatz ##
   - target: spatz
