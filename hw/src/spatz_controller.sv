@@ -242,7 +242,13 @@ module spatz_controller
       decoder_req.rs1   = issue_req_i.data_arga;
       decoder_req.rs2   = issue_req_i.data_argb;
       decoder_req.rsd   = issue_req_i.data_argc;
-      decoder_req.rd    = issue_req_i.id;
+      // Architectural destination register, taken from the instruction itself.
+      // It used to be issue_req_i.id: that works for an accelerator port whose
+      // id *is* the destination register (Snitch), but not for the CORE-V-XIF,
+      // where the id is a transaction tag handed out by a free running counter.
+      // The tag now travels alongside the request (see the buffer below) and is
+      // echoed back on the response, while rd stays the real register.
+      decoder_req.rd    = issue_req_i.data_op[11:7];
       decoder_req.vtype = vtype_q;
       decoder_req_valid = 1'b1;
     end
@@ -252,14 +258,27 @@ module spatz_controller
   // Request Buffer //
   ////////////////////
 
+  // The offload id and the illegal flag ride through the buffer next to the
+  // request, so both are still available when the instruction is finally
+  // issued to an execution unit (the decoder output is long gone by then).
+  localparam int unsigned IssueIdWidth = $bits(issue_req_i.id);
+
+  typedef struct packed {
+    logic [IssueIdWidth-1:0] issue_id;
+    logic                    instr_illegal;
+    spatz_req_t              spatz_req;
+  } req_buff_t;
+
   // Spatz request
-  spatz_req_t buffer_spatz_req;
+  spatz_req_t              buffer_spatz_req;
+  logic                    buffer_instr_illegal;
+  logic [IssueIdWidth-1:0] buffer_issue_id;
   // Buffer state signals
   logic       req_buffer_ready, req_buffer_valid, req_buffer_pop;
 
   // One element wide instruction buffer
   fall_through_register #(
-    .T(spatz_req_t)
+    .T(req_buff_t)
   ) i_req_buffer (
     .clk_i     (clk_i                ),
     .rst_ni    (rst_ni               ),
@@ -267,9 +286,9 @@ module spatz_controller
     .testmode_i(1'b0                 ),
     .ready_o   (req_buffer_ready     ),
     .valid_o   (req_buffer_valid     ),
-    .data_i    (decoder_rsp.spatz_req),
+    .data_i    ({issue_req_i.id, decoder_rsp.instr_illegal, decoder_rsp.spatz_req}),
     .valid_i   (decoder_rsp_valid    ),
-    .data_o    (buffer_spatz_req     ),
+    .data_o    ({buffer_issue_id, buffer_instr_illegal, buffer_spatz_req}),
     .ready_i   (req_buffer_pop       )
   );
 
@@ -716,9 +735,13 @@ module spatz_controller
 
   // Running instructions
   logic      [NrParallelInstructions-1:0] running_insn_d, running_insn_q;
+  // Offload id of each in-flight instruction, so the response can name the
+  // transaction the core is waiting on rather than an internal slot number.
+  logic      [NrParallelInstructions-1:0][IssueIdWidth-1:0] running_insn_issue_ids_d, running_insn_issue_ids_q;
   spatz_id_t                              next_insn_id;
   logic                                   running_insn_full;
   `FF(running_insn_q, running_insn_d, '0)
+  `FF(running_insn_issue_ids_q, running_insn_issue_ids_d, '0)
   logic                                   insn_shortcut_en;
   spatz_id_t                              insn_shortcut_id;
 
@@ -740,11 +763,14 @@ module spatz_controller
     // Define new spatz request
     spatz_req             = buffer_spatz_req;
     spatz_req.id          = next_insn_id;
+    // Both flags must come from the buffered request: the decoder output is
+    // only valid in the cycle the instruction was accepted, which is not the
+    // cycle it gets issued to an execution unit.
 `ifdef VENTAGLIO
-    spatz_req_vtl_illegal = !vtl_en_q && decoder_rsp.spatz_req.op_vtl.use_vtl; // illegal if vtl is disabled but used
-    spatz_req_illegal     = decoder_rsp_valid ? decoder_rsp.instr_illegal || spatz_req_vtl_illegal : 1'b0;
+    spatz_req_vtl_illegal = !vtl_en_q && spatz_req.op_vtl.use_vtl; // illegal if vtl is disabled but used
+    spatz_req_illegal     = req_buffer_valid ? buffer_instr_illegal || spatz_req_vtl_illegal : 1'b0;
 `else
-    spatz_req_illegal     = decoder_rsp_valid ? decoder_rsp.instr_illegal : 1'b0;
+    spatz_req_illegal     = req_buffer_valid ? buffer_instr_illegal : 1'b0;
 `endif
     spatz_req_valid       = req_buffer_pop && !spatz_req_illegal && (!running_insn_full);
 
@@ -822,13 +848,17 @@ module spatz_controller
 
   always_comb begin: proc_next_insn_id
     // Maintain state
-    running_insn_d = running_insn_q;
+    running_insn_d           = running_insn_q;
+    running_insn_issue_ids_d = running_insn_issue_ids_q;
 
-    // New instruction!
-    // A vl=0 op retires with no response, so tracking it would never clear
-    if (spatz_req_valid && spatz_req.ex_unit != CON &&
-        (spatz_req.vl != '0 || spatz_req.op_arith.is_reduction))
-      running_insn_d[next_insn_id] = 1'b1;
+    // New instruction! Every non-CON instruction is tracked, including a vl=0
+    // one: its execution unit still reports back (the scalar response path is
+    // no longer filtered on `wb`), and the offload it belongs to must produce
+    // exactly one response or the core's transaction id never frees up.
+    if (spatz_req_valid && spatz_req.ex_unit != CON) begin
+      running_insn_d[next_insn_id]           = 1'b1;
+      running_insn_issue_ids_d[next_insn_id] = buffer_issue_id;
+    end
 
     // Finished a instruction
     if (vfu_rsp_valid_i) begin
@@ -899,17 +929,21 @@ module spatz_controller
   logic     vfu_rsp_valid;
   logic     vfu_rsp_ready;
 
+  // Not filtered on `wb` any more: an offloaded instruction without a scalar
+  // writeback still has to retire its transaction id towards the core, so every
+  // VFU response has to reach the retire block below.
   spill_register #(
-    .T(vfu_rsp_t)
+    .T     (vfu_rsp_t),
+    .Bypass(1'b1     )
   ) i_vfu_scalar_response (
-    .clk_i  (clk_i                          ),
-    .rst_ni (rst_ni                         ),
-    .data_i (vfu_rsp_i                      ),
-    .valid_i(vfu_rsp_valid_i && vfu_rsp_i.wb),
-    .ready_o(vfu_rsp_ready_o                ),
-    .data_o (vfu_rsp                        ),
-    .valid_o(vfu_rsp_valid                  ),
-    .ready_i(vfu_rsp_ready                  )
+    .clk_i  (clk_i           ),
+    .rst_ni (rst_ni          ),
+    .data_i (vfu_rsp_i       ),
+    .valid_i(vfu_rsp_valid_i ),
+    .ready_o(vfu_rsp_ready_o ),
+    .data_o (vfu_rsp         ),
+    .valid_o(vfu_rsp_valid   ),
+    .ready_i(vfu_rsp_ready   )
   );
 
   logic       rsp_valid_d;
@@ -955,22 +989,38 @@ module spatz_controller
             default: rsp_d.data                 = '0;
           endcase
         end
-        rsp_d.id    = spatz_req.rd;
+        rsp_d.id    = buffer_issue_id;
+        rsp_d.rd    = spatz_req.rd;
+        rsp_d.we    = 1'b1;
         rsp_valid_d = 1'b1;
       end else begin
         // Change configuration and send back vl
-        rsp_d.id    = spatz_req.rd;
+        rsp_d.id    = buffer_issue_id;
+        rsp_d.rd    = spatz_req.rd;
         rsp_d.data  = elen_t'(vl_d);
+        rsp_d.we    = 1'b1;
         rsp_valid_d = 1'b1;
       end
-    end else if (vfu_rsp_valid) begin
-      rsp_d.id      = vfu_rsp.rd;
+    end else if (vfu_rsp_valid && running_insn_q[vfu_rsp.id]) begin
+      rsp_d.id      = running_insn_issue_ids_q[vfu_rsp.id];
+      rsp_d.rd      = vfu_rsp.rd;
       rsp_d.data    = vfu_rsp.result;
+      rsp_d.we      = vfu_rsp.wb;
 `ifdef MEMPOOL_SPATZ
       rsp_d.write   = 1'b1;
 `endif
       rsp_valid_d   = 1'b1;
       vfu_rsp_ready = rsp_ready_d;
+    // Loads, stores and slides carry no scalar result, but they still have to
+    // hand the offload id back so the core can reuse it.
+    end else if (vlsu_rsp_valid_i && running_insn_q[vlsu_rsp_i.id]) begin
+      rsp_d.id      = running_insn_issue_ids_q[vlsu_rsp_i.id];
+      rsp_d.we      = 1'b0;
+      rsp_valid_d   = 1'b1;
+    end else if (vsldu_rsp_valid_i && running_insn_q[vsldu_rsp_i.id]) begin
+      rsp_d.id      = running_insn_issue_ids_q[vsldu_rsp_i.id];
+      rsp_d.we      = 1'b0;
+      rsp_valid_d   = 1'b1;
     end
   end // retire
 
