@@ -160,8 +160,10 @@ module spatz import spatz_pkg::*; import rvv_pkg::*; import fpnew_pkg::*; #(
   assign spatz_mem_finished_o     = {spatz_mem_finished, fp_lsu_mem_finished};
   assign spatz_mem_str_finished_o = {spatz_mem_str_finished, fp_lsu_mem_str_finished};
 
-  if (!FPU) begin: gen_no_fpu_sequencer
-    // Spatz configured without an FPU. Just forward the requests to Spatz.
+  if (!FPU || !SCALAR_FPU_SUPPORT) begin: gen_no_fpu_sequencer
+    // No FPU, or the scalar core keeps its own FP register file: bypass the
+    // spatz_fpu_sequencer and forward the issue/response straight to/from the
+    // controller.
     assign issue_req     = issue_req_i;
     assign issue_valid   = issue_valid_i;
     assign issue_ready_o = issue_ready;

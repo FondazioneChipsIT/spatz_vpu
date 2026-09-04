@@ -32,6 +32,13 @@ package spatz_pkg;
   localparam int unsigned N_FU  = N_IPU > N_FPU ? N_IPU : N_FPU;
   // FPU support
   localparam bit FPU            = N_FPU != 0;
+  // Scalar FP register file support. 0 when the scalar core owns its own FP
+  // register file (CV32E40Px over the eXtension Interface): Spatz then never
+  // executes a scalar FP instruction, so the spatz_fpu_sequencer wrapper is
+  // bypassed entirely and the issue/response path goes straight to the
+  // controller. Snitch pairings, where Spatz owns the scalar FP regfile, set
+  // this to 1.
+  localparam bit SCALAR_FPU_SUPPORT = 0;
   // Single-precision floating point support
 `ifdef SPATZ_RVF
   localparam bit RVF            = `SPATZ_RVF;
