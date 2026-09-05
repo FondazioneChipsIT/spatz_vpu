@@ -894,6 +894,11 @@ module spatz_controller
           issue_rsp_o.writeback = spatz_req.use_rd;
         end // CON
         VFU: begin
+          // A VFU operation that writes a scalar register (vmv.x.s, vfmv.f.s,
+          // a reduction read back) does answer on the response channel, the
+          // purely vectorial ones do not. Report it, so the adapter knows which
+          // offloads it has to retire by itself.
+          issue_rsp_o.writeback = spatz_req.use_rd;
           // vtype is illegal -> illegal instruction
           if (vtype_q.vill) begin
             issue_rsp_o.accept = 1'b0;
@@ -929,21 +934,23 @@ module spatz_controller
   logic     vfu_rsp_valid;
   logic     vfu_rsp_ready;
 
-  // Not filtered on `wb` any more: an offloaded instruction without a scalar
-  // writeback still has to retire its transaction id towards the core, so every
-  // VFU response has to reach the retire block below.
+  // Upstream form, deliberately left alone: registered (so ready_o does not
+  // depend on valid) and filtered on `wb`. spatz_vfu gates the *start* of a
+  // scalar operation on vfu_rsp_ready_i, so this channel has to stay a plain
+  // elastic buffer - repurposing it to also retire eXtension Interface
+  // transaction ids closes a combinational loop and vmv.x.s / vfmv.f.s /
+  // reductions then never start. Retiring those ids is the adapter's job.
   spill_register #(
-    .T     (vfu_rsp_t),
-    .Bypass(1'b1     )
+    .T(vfu_rsp_t)
   ) i_vfu_scalar_response (
-    .clk_i  (clk_i           ),
-    .rst_ni (rst_ni          ),
-    .data_i (vfu_rsp_i       ),
-    .valid_i(vfu_rsp_valid_i ),
-    .ready_o(vfu_rsp_ready_o ),
-    .data_o (vfu_rsp         ),
-    .valid_o(vfu_rsp_valid   ),
-    .ready_i(vfu_rsp_ready   )
+    .clk_i  (clk_i                          ),
+    .rst_ni (rst_ni                         ),
+    .data_i (vfu_rsp_i                      ),
+    .valid_i(vfu_rsp_valid_i && vfu_rsp_i.wb),
+    .ready_o(vfu_rsp_ready_o                ),
+    .data_o (vfu_rsp                        ),
+    .valid_o(vfu_rsp_valid                  ),
+    .ready_i(vfu_rsp_ready                  )
   );
 
   logic       rsp_valid_d;
@@ -1011,16 +1018,6 @@ module spatz_controller
 `endif
       rsp_valid_d   = 1'b1;
       vfu_rsp_ready = rsp_ready_d;
-    // Loads, stores and slides carry no scalar result, but they still have to
-    // hand the offload id back so the core can reuse it.
-    end else if (vlsu_rsp_valid_i && running_insn_q[vlsu_rsp_i.id]) begin
-      rsp_d.id      = running_insn_issue_ids_q[vlsu_rsp_i.id];
-      rsp_d.we      = 1'b0;
-      rsp_valid_d   = 1'b1;
-    end else if (vsldu_rsp_valid_i && running_insn_q[vsldu_rsp_i.id]) begin
-      rsp_d.id      = running_insn_issue_ids_q[vsldu_rsp_i.id];
-      rsp_d.we      = 1'b0;
-      rsp_valid_d   = 1'b1;
     end
   end // retire
 
