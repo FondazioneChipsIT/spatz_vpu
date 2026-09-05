@@ -934,24 +934,46 @@ module spatz_controller
   logic     vfu_rsp_valid;
   logic     vfu_rsp_ready;
 
-  // Upstream form, deliberately left alone: registered (so ready_o does not
-  // depend on valid) and filtered on `wb`. spatz_vfu gates the *start* of a
-  // scalar operation on vfu_rsp_ready_i, so this channel has to stay a plain
-  // elastic buffer - repurposing it to also retire eXtension Interface
-  // transaction ids closes a combinational loop and vmv.x.s / vfmv.f.s /
-  // reductions then never start. Retiring those ids is the adapter's job.
+  // Registered (so ready_o does not depend on valid) and filtered on `wb`.
+  // spatz_vfu gates the *start* of a scalar operation on vfu_rsp_ready_i, so
+  // this channel has to stay a plain elastic buffer - repurposing it to also
+  // retire eXtension Interface transaction ids closes a combinational loop and
+  // vmv.x.s / vfmv.f.s / reductions then never start. Retiring the ids of the
+  // offloads Spatz does not answer is the adapter's job.
+  //
+  // The offload id travels *through* the buffer with the response. It cannot be
+  // looked up on the way out: running_insn_q[id] is cleared from the
+  // unregistered vfu_rsp_i, in the very cycle this register captures the
+  // response, so one cycle later - when the retire block sees it - the slot is
+  // already free and both the guard and running_insn_issue_ids_q read stale.
+  // vfmv.f.s then completed inside Spatz while its XIF result was silently
+  // dropped, and the core waited on that transaction id forever.
+  typedef struct packed {
+    vfu_rsp_t                rsp;
+    logic [IssueIdWidth-1:0] issue_id;
+  } vfu_scalar_rsp_t;
+
+  vfu_scalar_rsp_t vfu_scalar_rsp_in, vfu_scalar_rsp_out;
+
+  assign vfu_scalar_rsp_in = '{
+    rsp     : vfu_rsp_i,
+    issue_id: running_insn_issue_ids_q[vfu_rsp_i.id]
+  };
+
   spill_register #(
-    .T(vfu_rsp_t)
+    .T(vfu_scalar_rsp_t)
   ) i_vfu_scalar_response (
-    .clk_i  (clk_i                          ),
-    .rst_ni (rst_ni                         ),
-    .data_i (vfu_rsp_i                      ),
-    .valid_i(vfu_rsp_valid_i && vfu_rsp_i.wb),
-    .ready_o(vfu_rsp_ready_o                ),
-    .data_o (vfu_rsp                        ),
-    .valid_o(vfu_rsp_valid                  ),
-    .ready_i(vfu_rsp_ready                  )
+    .clk_i  (clk_i              ),
+    .rst_ni (rst_ni             ),
+    .data_i (vfu_scalar_rsp_in  ),
+    .valid_i(vfu_rsp_valid_i && vfu_rsp_i.wb && running_insn_q[vfu_rsp_i.id]),
+    .ready_o(vfu_rsp_ready_o    ),
+    .data_o (vfu_scalar_rsp_out ),
+    .valid_o(vfu_rsp_valid      ),
+    .ready_i(vfu_rsp_ready      )
   );
+
+  assign vfu_rsp = vfu_scalar_rsp_out.rsp;
 
   logic       rsp_valid_d;
   spatz_rsp_t rsp_d;
@@ -1008,8 +1030,8 @@ module spatz_controller
         rsp_d.we    = 1'b1;
         rsp_valid_d = 1'b1;
       end
-    end else if (vfu_rsp_valid && running_insn_q[vfu_rsp.id]) begin
-      rsp_d.id      = running_insn_issue_ids_q[vfu_rsp.id];
+    end else if (vfu_rsp_valid) begin
+      rsp_d.id      = vfu_scalar_rsp_out.issue_id;
       rsp_d.rd      = vfu_rsp.rd;
       rsp_d.data    = vfu_rsp.result;
       rsp_d.we      = vfu_rsp.wb;
