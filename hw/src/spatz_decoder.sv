@@ -68,7 +68,18 @@ module spatz_decoder
         riscv_instr::VFRDIV_VF,
         riscv_instr::VFSQRT_V,
         riscv_instr::VFRSQRT7_V,
-        riscv_instr::VFREC7_V: begin
+        riscv_instr::VFREC7_V,
+        // Narrowing shifts, likewise: VNSRL and VNSRA are in op_e but nothing
+        // references them - not the decoder, not spatz_vfu, not the SIMD lane.
+        // vnsra.wi already trapped by falling through to the default; vnsrl.wi
+        // aliased a decoded pattern and returned a wrong value instead. Refuse
+        // both, so the two behave the same and neither computes silently.
+        riscv_instr::VNSRL_WV,
+        riscv_instr::VNSRL_WX,
+        riscv_instr::VNSRL_WI,
+        riscv_instr::VNSRA_WV,
+        riscv_instr::VNSRA_WX,
+        riscv_instr::VNSRA_WI: begin
           illegal_instr = 1'b1;
         end
 
