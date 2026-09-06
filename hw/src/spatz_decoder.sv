@@ -53,6 +53,25 @@ module spatz_decoder
       automatic logic [6:0] opcode = decoder_req_i.instr[6:0];
 
       unique casez (decoder_req_i.instr)
+        // Vector floating-point divide and square root, and the reciprocal
+        // estimates, are not implemented: there is no VFDIV or VFSQRT in op_e
+        // and spatz_vfu has no case for them, so they used to be accepted and
+        // fall through its operation map to the default - `vfdiv.vv` quietly
+        // returned a *product* and then left the VFU wedged. Refuse them, so
+        // the core takes an illegal-instruction trap and the software finds
+        // out, instead of computing with a wrong number.
+        //
+        // XDivSqrt does not change this: it gates Snitch's *scalar* divider,
+        // not the vector unit. If the VFU ever gains them, delete this case.
+        riscv_instr::VFDIV_VV,
+        riscv_instr::VFDIV_VF,
+        riscv_instr::VFRDIV_VF,
+        riscv_instr::VFSQRT_V,
+        riscv_instr::VFRSQRT7_V,
+        riscv_instr::VFREC7_V: begin
+          illegal_instr = 1'b1;
+        end
+
         // Load and store instructions
         riscv_instr::VLE8_V,
         riscv_instr::VLE16_V,
