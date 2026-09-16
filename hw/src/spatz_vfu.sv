@@ -1789,9 +1789,14 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
       logic int_fpu_in_valid_gated;
       logic fpu_result_ready;
 
+      // don't start new slots because completed word has not been consumed yet by vrf
+      logic divsqrt_word_pending;
+      assign divsqrt_word_pending = divsqrt_shared_active && (&divsqrt_acc_valid_q);
+
       assign int_fpu_in_valid_gated = int_fpu_in_valid
         && (fpu == 0 || !(divsqrt_shared_active))
         && !(fpu == 0 && divsqrt_shared_active && divsqrt_inflight_q);
+        && !(fpu == 0 && divsqrt_word_pending);
 
       assign fpu_result_ready = (fpu == 0 && divsqrt_shared_active) ? 1'b1 : result_ready;
 
