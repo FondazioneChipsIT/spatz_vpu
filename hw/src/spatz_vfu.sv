@@ -1795,7 +1795,7 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
 
       assign int_fpu_in_valid_gated = int_fpu_in_valid
         && (fpu == 0 || !(divsqrt_shared_active))
-        && !(fpu == 0 && divsqrt_shared_active && divsqrt_inflight_q);
+        && !(fpu == 0 && divsqrt_shared_active && divsqrt_inflight_q)
         && !(fpu == 0 && divsqrt_word_pending);
 
       assign fpu_result_ready = (fpu == 0 && divsqrt_shared_active) ? 1'b1 : result_ready;
