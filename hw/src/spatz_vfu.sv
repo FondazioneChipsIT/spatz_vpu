@@ -1248,10 +1248,6 @@ module spatz_vfu
   vrf_addr_t [2:0] vreg_addr_q, vreg_addr_d;
   `FF(vreg_addr_q, vreg_addr_d, '0)
 
-  // The signal to choose comparison instructions
-  logic is_cmp_req;
-  assign is_cmp_req = (spatz_req.op == VFCMP) || spatz_req.op inside {VMSEQ, VMSNE, VMSLT, VMSLTU, VMSLE, VMSLEU, VMSGT, VMSGTU};
-
   // Calculate new vector register address
   always_comb begin : vreg_addr_proc
     vreg_addr_d = vreg_addr_q;
