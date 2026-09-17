@@ -24,6 +24,7 @@ package spatz_pkg;
   localparam int unsigned N_FU  = N_IPU > N_FPU ? N_IPU : N_FPU;
   // FPU support
   localparam bit FPU            = N_FPU != 0;
+  localparam bit SCALAR_FPU_SUPPORT = 0;
   // Single-precision floating point support
   localparam bit RVF            = 1;
   // Double-precision floating-point support
