@@ -716,9 +716,11 @@ module spatz_controller
 
   // Running instructions
   logic      [NrParallelInstructions-1:0] running_insn_d, running_insn_q;
+  logic      [NrParallelInstructions-1:0][$bits(issue_req_i.id)-1:0] running_insn_issue_ids_d, running_insn_issue_ids_q;
   spatz_id_t                              next_insn_id;
   logic                                   running_insn_full;
   `FF(running_insn_q, running_insn_d, '0)
+  `FF(running_insn_issue_ids_q, running_insn_issue_ids_d, '0)
   logic                                   insn_shortcut_en;
   spatz_id_t                              insn_shortcut_id;
 
@@ -823,12 +825,15 @@ module spatz_controller
   always_comb begin: proc_next_insn_id
     // Maintain state
     running_insn_d = running_insn_q;
+    running_insn_issue_ids_d = running_insn_issue_ids_q;
 
     // New instruction!
     // A vl=0 op retires with no response, so tracking it would never clear
-    if (spatz_req_valid && spatz_req.ex_unit != CON &&
-        (spatz_req.vl != '0 || spatz_req.op_arith.is_reduction))
+    if (spatz_req_valid && spatz_req.ex_unit != CON)
+    begin
       running_insn_d[next_insn_id] = 1'b1;
+      running_insn_issue_ids_d[next_insn_id] = buffer_issue_id;
+    end
 
     // Finished a instruction
     if (vfu_rsp_valid_i) begin
