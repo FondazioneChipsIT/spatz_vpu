@@ -956,22 +956,37 @@ module spatz_controller
             default: rsp_d.data                 = '0;
           endcase
         end
-        rsp_d.id    = spatz_req.rd;
+        rsp_d.id    = buffer_issue_id;
+        rsp_d.rd    = spatz_req.rd;
+        rsp_d.we    = 1'b1;
         rsp_valid_d = 1'b1;
       end else begin
         // Change configuration and send back vl
-        rsp_d.id    = spatz_req.rd;
+        rsp_d.id    = buffer_issue_id;
+        rsp_d.rd    = spatz_req.rd;
         rsp_d.data  = elen_t'(vl_d);
+        rsp_d.we    = 1'b1;
         rsp_valid_d = 1'b1;
       end
-    end else if (vfu_rsp_valid) begin
-      rsp_d.id      = vfu_rsp.rd;
+    end else if (vfu_rsp_valid && running_insn_q[vfu_rsp.id]) begin
+      rsp_d.id      = running_insn_issue_ids_q[vfu_rsp.id];
+      rsp_d.rd      = vfu_rsp.rd;
       rsp_d.data    = vfu_rsp.result;
+      rsp_d.we    = 1'b1;
 `ifdef MEMPOOL_SPATZ
       rsp_d.write   = 1'b1;
 `endif
       rsp_valid_d   = 1'b1;
       vfu_rsp_ready = rsp_ready_d;
+    end else if (vlsu_rsp_valid_i && running_insn_q[vlsu_rsp_i.id]) begin
+      rsp_d.id      = running_insn_issue_ids_q[vlsu_rsp_i.id];
+      // TODO: exception not handled
+      // TODO: set exception code
+      //rsp_d.exc     = vlsu_rsp_i.exc;
+      rsp_valid_d   = 1'b1;
+    end else if (vsldu_rsp_valid_i && running_insn_q[vsldu_rsp_i.id]) begin
+      rsp_d.id      = running_insn_issue_ids_q[vsldu_rsp_i.id];
+      rsp_valid_d   = 1'b1;
     end
   end // retire
 
