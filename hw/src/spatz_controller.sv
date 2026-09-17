@@ -868,25 +868,6 @@ module spatz_controller
         CON: begin
           issue_rsp_o.writeback = spatz_req.use_rd;
         end // CON
-        VFU: begin
-          // vtype is illegal -> illegal instruction
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-          end
-        end // VFU
-        LSU: begin
-          issue_rsp_o.loadstore = 1'b1;
-          // vtype is illegal -> illegal instruction
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-          end
-        end // LSU
-        SLD: begin
-          // vtype is illegal -> illegal instruction
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-          end
-        end // SLD
         default:;
       endcase // Operation type
     // The decoding resulted in an illegal instruction
