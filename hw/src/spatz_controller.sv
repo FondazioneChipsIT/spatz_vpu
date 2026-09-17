@@ -242,7 +242,7 @@ module spatz_controller
       decoder_req.rs1   = issue_req_i.data_arga;
       decoder_req.rs2   = issue_req_i.data_argb;
       decoder_req.rsd   = issue_req_i.data_argc;
-      decoder_req.rd    = issue_req_i.id;
+      decoder_req.rd    = issue_req_i.data_op[11:7];
       decoder_req.vtype = vtype_q;
       decoder_req_valid = 1'b1;
     end
