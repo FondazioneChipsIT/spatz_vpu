@@ -160,7 +160,7 @@ module spatz import spatz_pkg::*; import rvv_pkg::*; import fpnew_pkg::*; #(
   assign spatz_mem_finished_o     = {spatz_mem_finished, fp_lsu_mem_finished};
   assign spatz_mem_str_finished_o = {spatz_mem_str_finished, fp_lsu_mem_str_finished};
 
-  if (!FPU) begin: gen_no_fpu_sequencer
+  if (!FPU || !SCALAR_FPU_SUPPORT) begin: gen_no_fpu_sequencer
     // Spatz configured without an FPU. Just forward the requests to Spatz.
     assign issue_req     = issue_req_i;
     assign issue_valid   = issue_valid_i;
