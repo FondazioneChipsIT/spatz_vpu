@@ -765,7 +765,6 @@ module spatz_controller
             spatz_req.vl     = 1;
             spatz_req.vstart = '0;
           end
-	  
 	        // Cap vl for mask instructions
           if (spatz_req.op inside {VMAND, VMANDNOT, VMOR, VMXOR,
                                    VMORNOT, VMNAND, VMNOR, VMXNOR}) begin
@@ -874,30 +873,7 @@ module spatz_controller
       case (decoder_rsp.spatz_req.ex_unit)
         CON: begin
           issue_rsp_o.writeback = spatz_req.use_rd;
-        end
-        VFU: begin
-          // Do not check vtype for scalar operations running on the spatz VFU
-          if (!decoder_rsp.spatz_req.op_arith.is_scalar) begin
-            // vtype is illegal -> illegal instruction
-            if (vtype_q.vill) begin
-              issue_rsp_o.accept = 1'b0;
-              issue_rsp_o.exception = 1'b1;
-            end
-          end
-        end
-        LSU: begin
-          issue_rsp_o.loadstore = 1'b1;
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-            issue_rsp_o.exception = 1'b1;
-          end
-        end
-        SLD: begin
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-            issue_rsp_o.exception = 1'b1;
-          end
-        end
+        end // CON
         default:;
       endcase // Operation type
     // The decoding resulted in an illegal instruction
