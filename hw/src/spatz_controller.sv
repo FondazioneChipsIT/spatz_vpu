@@ -901,16 +901,17 @@ module spatz_controller
   logic     vfu_rsp_ready;
 
   spill_register #(
-    .T(vfu_rsp_t)
+    .T(vfu_rsp_t),
+    .Bypass(1'b1)
   ) i_vfu_scalar_response (
-    .clk_i  (clk_i                          ),
-    .rst_ni (rst_ni                         ),
-    .data_i (vfu_rsp_i                      ),
-    .valid_i(vfu_rsp_valid_i && vfu_rsp_i.wb),
-    .ready_o(vfu_rsp_ready_o                ),
-    .data_o (vfu_rsp                        ),
-    .valid_o(vfu_rsp_valid                  ),
-    .ready_i(vfu_rsp_ready                  )
+    .clk_i  (clk_i           ),
+    .rst_ni (rst_ni          ),
+    .data_i (vfu_rsp_i       ),
+    .valid_i(vfu_rsp_valid_i ),
+    .ready_o(vfu_rsp_ready_o ),
+    .data_o (vfu_rsp         ),
+    .valid_o(vfu_rsp_valid   ),
+    .ready_i(vfu_rsp_ready   )
   );
 
   logic       rsp_valid_d;
