@@ -668,31 +668,47 @@ module spatz_vfu
   // Accumulate the slots already completed for the current VRF word
   logic [N_FU*ELEN-1:0]  divsqrt_acc_d, divsqrt_acc_q;
   logic [N_FU*ELENB-1:0] divsqrt_acc_valid_d, divsqrt_acc_valid_q;
-
   `FF(divsqrt_acc_q, divsqrt_acc_d, '0)
   `FF(divsqrt_acc_valid_q, divsqrt_acc_valid_d, '0)
 
+  logic divsqrt_shared_ready;
+  logic divsqrt_closing_slot;
+
+  // Handshake on FPU0 output
   logic divsqrt_pop;
-  assign divsqrt_pop = divsqrt_shared_active
-                    && (fpu_result_valid[ELENB-1:0] == '1)
-                    && &(result_valid[ELENB-1:0] | ~pending_results[ELENB-1:0]);
+
+  logic divsqrt_done_q, divsqrt_done_d;
+  `FF(divsqrt_done_q, divsqrt_done_d, 1'b0)
+
+  // Set once the last element of the instruction has been committed to the VRF
+  always_comb begin : proc_divsqrt_done
+    divsqrt_done_d = divsqrt_done_q;
+    if (divsqrt_pop && result_tag.last)
+      divsqrt_done_d = 1'b1;
+    else if (fpu_load_ready[0])
+      divsqrt_done_d = 1'b0;
+  end : proc_divsqrt_done
+
+  // This result completes the VRF word: last slot or last element of the instruction
+  assign divsqrt_closing_slot = (divsqrt_slot_q == N_FU - 1) || result_tag.last;
+
+  // Intermediate slots are always absorbed by the accumulator --> the closing slot is handed over only when the VRF commits the word
+  assign divsqrt_shared_ready = !divsqrt_done_q && (!divsqrt_closing_slot || vrf_wvalid_i);
+
+  assign divsqrt_pop = divsqrt_shared_active && (fpu_result_valid[ELENB-1:0] == '1) && divsqrt_shared_ready;
 
   always_comb begin : proc_divsqrt_acc
     divsqrt_acc_d       = divsqrt_acc_q;
     divsqrt_acc_valid_d = divsqrt_acc_valid_q;
 
-    if (divsqrt_shared_active) begin
-      // Current slot result
-      if (fpu_result_valid[ELENB-1:0] == '1) begin
-        divsqrt_acc_d[divsqrt_slot_q*ELEN +: ELEN ] = fpu_result[ELEN-1:0];
-        divsqrt_acc_valid_d[divsqrt_slot_q*ELENB +: ELENB] = '1;
-      end
-      // The word has been consumed: restart clean
-      if (result_ready) begin
-        divsqrt_acc_d       = '0;
-        divsqrt_acc_valid_d = '0;
-      end
-    end else begin
+    // Capture the slot handed over by FPU0
+    if (divsqrt_pop) begin
+      divsqrt_acc_d[divsqrt_slot_q*ELEN +: ELEN] = fpu_result[ELEN-1:0];
+      divsqrt_acc_valid_d[divsqrt_slot_q*ELENB +: ELENB] = '1;
+    end
+
+    // Word committed to the VRF, or not a shared divsqrt: restart clean
+    if (result_ready || !divsqrt_shared_active) begin
       divsqrt_acc_d       = '0;
       divsqrt_acc_valid_d = '0;
     end
@@ -855,13 +871,9 @@ module spatz_vfu
   logic fu_can_accept;
   assign fu_can_accept = spatz_req_valid && &(in_ready | ~valid_operations) && operands_ready && !stall;
 
-  // Last element of the instruction has just exited FPU0. This is needed because the final word may not fill all slots
-  logic fu_tail_done;
-  assign fu_tail_done = result_tag.last && (fpu_result_valid[ELENB-1:0] == '1);
-
   // the word can only advance when all slots have been consumed
   logic fu_word_can_advance;
-  assign fu_word_can_advance = !divsqrt_shared_active || fu_word_complete || fu_tail_done;
+  assign fu_word_can_advance = !divsqrt_shared_active || (fu_word_complete && vrf_wvalid_i);
 
   always_comb begin: proc_reduction
     // Maintain state
@@ -1789,16 +1801,11 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
       logic int_fpu_in_valid_gated;
       logic fpu_result_ready;
 
-      // don't start new slots because completed word has not been consumed yet by vrf
-      logic divsqrt_word_pending;
-      assign divsqrt_word_pending = divsqrt_shared_active && (&divsqrt_acc_valid_q);
-
       assign int_fpu_in_valid_gated = int_fpu_in_valid
         && (fpu == 0 || !(divsqrt_shared_active))
-        && !(fpu == 0 && divsqrt_shared_active && divsqrt_inflight_q)
-        && !(fpu == 0 && divsqrt_word_pending);
+        && !(fpu == 0 && divsqrt_shared_active && divsqrt_inflight_q);
 
-      assign fpu_result_ready = (fpu == 0 && divsqrt_shared_active) ? 1'b1 : result_ready;
+      assign fpu_result_ready = (fpu == 0 && divsqrt_shared_active)? divsqrt_shared_ready : result_ready;
 
 
       `FFL(fpu_operand1_q, fpu_operand1, int_fpu_in_valid && int_fpu_in_ready, '0)
