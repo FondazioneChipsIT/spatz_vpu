@@ -4,7 +4,7 @@
 //
 // Author: Matheus Cavalcante, ETH Zurich
 //
-// The vector slide unit executes all slide instructions
+// The vector slide unit executes all slide instructions and vcompress.vm
 
 module spatz_vsldu
   import spatz_pkg::*;
@@ -58,6 +58,9 @@ module spatz_vsldu
     .ready_i(spatz_req_ready                                )
   );
 
+// Is the current instruction a vcompress?
+  logic is_compress;
+  assign is_compress = spatz_req_valid && (spatz_req.op == VCOMPRESS);
 
   vrf_data_t rs1_masked;
   always_comb begin: rs1_proc
@@ -140,8 +143,13 @@ module spatz_vsldu
   // Signals //
   /////////////
 
-  // Is the register file operation valid?
+  // Is the register file operation valid? (slide path)
   logic vreg_operations_finished;
+  // Compress path finished
+  logic cmp_finished;
+  // Either path finished -- drives the shared completion logic
+  logic ops_finished;
+  assign ops_finished = is_compress ? cmp_finished : vreg_operations_finished;
 
   // Is the vector length zero (no active instruction)
   logic is_vl_zero;
@@ -162,6 +170,59 @@ module spatz_vsldu
   // Are we doing a vregfile read prefetch (when we slide down)
   logic prefetch_q, prefetch_d;
   `FF(prefetch_q, prefetch_d, 1'b0);
+
+  ////////////////////////
+  // Compressor signals //
+  ////////////////////////
+
+  // Source word currently being read, and how many of them there are
+  vlen_t cmp_word_q, cmp_word_d;
+  `FF(cmp_word_q, cmp_word_d, '0)
+  
+  // Number of source words to read
+  vlen_t cmp_num_words;
+
+  // mask register vs1 read from vs1 
+  vrf_data_t cmp_mask_lo_q, cmp_mask_hi_q;
+  logic [VLEN-1:0] cmp_mask;
+
+  // active elements before the current word
+  vlen_t cmp_base_q, cmp_base_d;
+  `FF(cmp_base_q, cmp_base_d, '0)
+
+  // Total number of destination bytes, latched on the last source word
+  vlen_t cmp_total_byte_q, cmp_total_byte_d;
+  `FF(cmp_total_byte_q, cmp_total_byte_d, '0)
+
+  // Base element of the current source word
+  vlen_t cmp_elem_base;
+
+  // Number of elements per source word
+  vlen_t cmp_elem_per_word;
+
+  // Byte-enable mask of the current source word
+  logic [VRFWordBWidth-1:0] cmp_chunk_be;
+
+  logic  cmp_last_word;
+
+  // accumulator
+  vrf_data_t cmp_acc_q, cmp_acc_d;
+  `FF(cmp_acc_q, cmp_acc_d, '0)
+
+  // Per-word derived quantities
+  vlen_t                            cmp_chunk_cnt;
+  vlen_t                            cmp_start_byte, cmp_end_byte;
+  logic [$clog2(VRFWordBWidth)-1:0] cmp_offset;
+  logic                             cmp_emit_word;
+
+  // Datapath
+  vrf_data_t cmp_part_lo, cmp_part_hi;
+
+  // Control
+  logic      cmp_need_flush, cmp_stall, cmp_advance;
+  logic      cmp_re, cmp_req_valid;
+  vrf_addr_t cmp_raddr;
+  vrf_req_t  cmp_req;
 
   ///////////////////
   // State Handler //
@@ -186,6 +247,9 @@ module spatz_vsldu
 
   `FF(new_vsldu_request_q, new_vsldu_request, '0)
 
+  logic new_compress_request;
+  assign new_compress_request = new_vsldu_request && is_compress;
+
   typedef enum logic[1:0] {
     VREG_READ_V0_t_lo, // Add a state to read v0.t
     VREG_READ_V0_t_hi,
@@ -195,8 +259,18 @@ module spatz_vsldu
   vreg_operation_first_t vreg_operation_first_q, vreg_operation_first_d;
   `FF(vreg_operation_first_q, vreg_operation_first_d, VREG_IDLE)
 
+  typedef enum logic [2:0] {
+    CMP_IDLE,
+    CMP_READ_MASK_LO,
+    CMP_READ_MASK_HI,
+    CMP_RUN,
+    CMP_FLUSH
+  } cmp_state_e;
+  cmp_state_e cmp_state_q, cmp_state_d;
+  `FF(cmp_state_q, cmp_state_d, CMP_IDLE)
+
   // Accept a new operation or clear req register if we are finished
-  always_comb begin
+  always_comb begin : vsldu_new_request_proc
     slide_amount_d = slide_amount_q;
     prefetch_d     = prefetch_q;
     running_d      = running_q;
@@ -209,14 +283,20 @@ module spatz_vsldu
       // Mark the instruction as running
       running_d[spatz_req.id] = 1'b1;
 
-      slide_amount_d = spatz_req.op_sld.insert ? (spatz_req.op_sld.vmv ? 'd0 : 'd1) : spatz_req.rs1;
-      slide_amount_d <<= spatz_req.vtype.vsew;
+      if (spatz_req.op == VCOMPRESS) begin
+        // vcompress has no scalar slide amount and needs no prefetch
+        slide_amount_d = '0;
+        prefetch_d     = 1'b0;
+      end else begin
+        slide_amount_d = spatz_req.op_sld.insert ? (spatz_req.op_sld.vmv ? 'd0 : 'd1) : spatz_req.rs1;
+        slide_amount_d <<= spatz_req.vtype.vsew;
 
-      prefetch_d = spatz_req.op == VSLIDEUP ? spatz_req.vstart >= VRFWordBWidth : 1'b1;
+        prefetch_d = spatz_req.op == VSLIDEUP ? spatz_req.vstart >= VRFWordBWidth : 1'b1;
+      end
     end
 
     // Finished an instruction
-    if (vreg_operations_finished) begin
+    if (ops_finished) begin
       // We are handling an instruction
       spatz_req_ready = 1'b1;
 
@@ -227,7 +307,67 @@ module spatz_vsldu
     // Clear the prefetch register
     if (prefetch_q && vrf_re_o && vrf_rvalid_i && vreg_operation_first_q != VREG_READ_V0_t_lo && vreg_operation_first_q != VREG_READ_V0_t_hi)
       prefetch_d = 1'b0;
-  end
+  end : vsldu_new_request_proc
+
+  //////////////////////
+  // Compress control //
+  //////////////////////
+
+  // The mask register is fetched as at most two VRF words --> same as v0 for masking
+  `FFL(cmp_mask_lo_q, vrf_rdata_i, (cmp_state_q == CMP_READ_MASK_LO) && vrf_rvalid_i, '0)
+  `FFL(cmp_mask_hi_q, vrf_rdata_i, (cmp_state_q == CMP_READ_MASK_HI) && vrf_rvalid_i, '0)
+
+  assign cmp_mask = {cmp_mask_hi_q, cmp_mask_lo_q};
+
+  assign cmp_num_words = (spatz_req.vl + vlen_t'(VRFWordBWidth) - 1) >> $clog2(VRFWordBWidth);
+  assign cmp_last_word = (cmp_word_q + 1) >= cmp_num_words;
+
+  assign cmp_start_byte = cmp_base_q << spatz_req.vtype.vsew;
+  assign cmp_end_byte   = (cmp_base_q + cmp_chunk_cnt) << spatz_req.vtype.vsew;
+  assign cmp_offset     = cmp_start_byte[$clog2(VRFWordBWidth)-1:0];
+  assign cmp_emit_word  = (cmp_end_byte >> $clog2(VRFWordBWidth)) != (cmp_start_byte >> $clog2(VRFWordBWidth));
+
+  // A final partial write is needed whenever the total is not a multiple of a VRF word
+  assign cmp_need_flush = (cmp_end_byte[$clog2(VRFWordBWidth)-1:0] != '0) || (cmp_end_byte == '0);
+
+  // An emit that the output register cannot take freezes the read counter, the prefix sum and the accumulator
+  assign cmp_stall   = (cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word && !vrf_req_ready_d;
+  assign cmp_advance = (cmp_state_q == CMP_RUN) && vrf_rvalid_i && !cmp_stall;
+
+  assign cmp_finished = (cmp_advance && cmp_last_word && !cmp_need_flush) || ((cmp_state_q == CMP_FLUSH) && vrf_req_ready_d);
+
+  always_comb begin : cmp_fsm_state_evolution
+    cmp_state_d = cmp_state_q;
+
+    unique case (cmp_state_q)
+      CMP_IDLE: begin
+        if (new_compress_request && !is_vl_zero)
+          cmp_state_d = CMP_READ_MASK_LO;
+      end
+
+      CMP_READ_MASK_LO: begin
+        if (vrf_rvalid_i)
+          cmp_state_d = (NrWordsPerVector > 1) ? CMP_READ_MASK_HI : CMP_RUN;
+      end
+
+      CMP_READ_MASK_HI: begin
+        if (vrf_rvalid_i)
+          cmp_state_d = CMP_RUN;
+      end
+
+      CMP_RUN: begin
+        if (cmp_advance && cmp_last_word)
+          cmp_state_d = cmp_need_flush ? CMP_FLUSH : CMP_IDLE;
+      end
+
+      CMP_FLUSH: begin
+        if (vrf_req_ready_d)
+          cmp_state_d = CMP_IDLE;
+      end
+
+      default: cmp_state_d = CMP_IDLE;
+    endcase
+  end : cmp_fsm_state_evolution
 
   /////////////////////
   //  Slide control  //
@@ -274,7 +414,7 @@ module spatz_vsldu
   // Generate masking based on v0.t
   logic [VLEN-1:0] vm_masking;
 
-  always_comb begin
+  always_comb begin : vsldu_vm_masking_proc
     vm_masking = '1;
     if(!spatz_req.op_sld.vm) begin
       case (spatz_req.vtype.vsew)
@@ -293,7 +433,7 @@ module spatz_vsldu
         end
       endcase
     end
-  end
+  end : vsldu_vm_masking_proc
 
   always_comb begin: vsldu_vreg_counter_proc
     // How many elements are left to do
@@ -353,6 +493,13 @@ module spatz_vsldu
       end
       default:;
     endcase
+    
+    // vcompress does not use this FSM, so it is frozen in the idle state
+    if (is_compress) begin
+      vreg_operation_first   = 1'b0;
+      vreg_operation_first_d = VREG_IDLE;
+    end
+
     vreg_operation_last = spatz_req_valid && !prefetch_q && (delta <= (VRFWordBWidth - vreg_counter_q[idx_width(VRFWordBWidth)-1:0]));
 
     // How many operations are we calculating now?
@@ -366,7 +513,7 @@ module spatz_vsldu
     end
 
     // Do we have to increment the counter?
-    vreg_counter_en = (vreg_operation_first_q!=VREG_READ_V0_t_lo) && (vreg_operation_first_q!=VREG_READ_V0_t_hi) && ((spatz_req.use_vs2 && vrf_re_o && vrf_rvalid_i) || !spatz_req.use_vs2) && ((spatz_req.use_vd && vrf_req_valid_d && vrf_req_ready_d) || !spatz_req.use_vd);
+    vreg_counter_en = !is_compress && (vreg_operation_first_q!=VREG_READ_V0_t_lo) && (vreg_operation_first_q!=VREG_READ_V0_t_hi) && ((spatz_req.use_vs2 && vrf_re_o && vrf_rvalid_i) || !spatz_req.use_vs2) && ((spatz_req.use_vd && vrf_req_valid_d && vrf_req_ready_d) || !spatz_req.use_vd);
     if (vreg_counter_en) begin
       if (vreg_operation_last)
         // Reset the counter
@@ -395,7 +542,7 @@ module spatz_vsldu
     case (state_q)
       VSLDU_RUNNING: begin
         // Did we finish the execution of an instruction?
-        if (!is_vl_zero && vreg_operations_finished && spatz_req_valid) begin
+        if (!is_vl_zero && ops_finished && spatz_req_valid) begin
           op_id_d = spatz_req.id;
           state_d = VSLDU_WAIT_WVALID;
         end
@@ -410,7 +557,7 @@ module spatz_vsldu
           state_d           = VSLDU_RUNNING;
 
           // Did we finish *another* instruction?
-          if (!is_vl_zero && vreg_operations_finished && spatz_req_valid) begin
+          if (!is_vl_zero && ops_finished && spatz_req_valid) begin
             op_id_d = spatz_req.id;
             state_d = VSLDU_WAIT_WVALID;
           end
@@ -420,6 +567,96 @@ module spatz_vsldu
       default:;
     endcase
   end: vsldu_rsp
+
+  ///////////////////////
+  // Compress datapath //
+  ///////////////////////
+  vrf_data_t compact_data;
+  logic [$bits(compact_data)*2-1:0] cmp_shifted_data;
+
+  assign cmp_elem_base = (cmp_word_q << $clog2(VRFWordBWidth)) >> spatz_req.vtype.vsew;
+  assign cmp_elem_per_word = vlen_t'(VRFWordBWidth) >> spatz_req.vtype.vsew;
+
+  always_comb begin : cmp_counters_proc
+    cmp_word_d       = cmp_word_q;
+    cmp_base_d       = cmp_base_q;
+    cmp_total_byte_d = cmp_total_byte_q;
+
+    if (new_compress_request) begin
+      cmp_word_d       = '0;
+      cmp_base_d       = '0;
+      cmp_total_byte_d = '0;
+
+    end else if (cmp_advance) begin
+      cmp_base_d = cmp_base_q + cmp_chunk_cnt;
+      if (!cmp_last_word)
+        cmp_word_d = cmp_word_q + 1;
+      else
+        cmp_total_byte_d = cmp_end_byte;
+    end
+  end : cmp_counters_proc
+
+  always_comb begin : cmp_chunk_mask_proc
+    automatic int unsigned j;
+    // absolute element index of the current source word's elements
+    automatic vlen_t cmp_elem_abs_idx;
+    cmp_chunk_be  = '0;
+    cmp_chunk_cnt = '0;
+    compact_data  = '0;
+    cmp_shifted_data = '0;
+    j = 0;
+
+    // select bytes in the chunk
+    for (int b = 0; b < VRFWordBWidth; b++) begin
+      cmp_elem_abs_idx = cmp_elem_base + vlen_t'(b >> spatz_req.vtype.vsew);
+      if (cmp_elem_abs_idx < (spatz_req.vl >> spatz_req.vtype.vsew))
+        cmp_chunk_be[b] = cmp_mask[cmp_elem_abs_idx];
+    end
+    // count valid elements in the chunk
+    for (int e = 0; e < VRFWordBWidth; e++)
+      if (vlen_t'(e) < cmp_elem_per_word)
+        cmp_chunk_cnt = cmp_chunk_cnt + vlen_t'(cmp_chunk_be[e << spatz_req.vtype.vsew]);
+    // compact read data
+    for (int i = 0; i < VRFWordBWidth; i++) begin
+      if (cmp_chunk_be[i]) begin
+        compact_data[j*8+:8] = vrf_rdata_i[i*8+:8];
+        j=j+1;
+      end
+    end
+    // extend in a larger signal and apply the offset
+    cmp_shifted_data = {{$bits(compact_data){1'b0}}, compact_data} << {cmp_offset, 3'b000};
+    // select part_hi and part_lo
+    cmp_part_hi = cmp_shifted_data[$bits(compact_data)*2-1:$bits(compact_data)];
+    cmp_part_lo = cmp_shifted_data[$bits(compact_data)-1:0];
+  end : cmp_chunk_mask_proc
+
+  always_comb begin : cmp_accumulator_proc
+    cmp_acc_d = cmp_acc_q;
+
+    if (new_compress_request)
+      cmp_acc_d = '0;
+    else if (cmp_advance)
+      cmp_acc_d = cmp_emit_word ? cmp_part_hi : (cmp_acc_q | cmp_part_lo);
+    else if ((cmp_state_q == CMP_FLUSH) && vrf_req_ready_d)
+      cmp_acc_d = '0;
+  end : cmp_accumulator_proc
+
+  always_comb begin : cmp_write_req_proc
+    if (cmp_state_q == CMP_FLUSH) begin
+      cmp_req.wdata = cmp_acc_q;
+      // wbe != '1 if we are in flush state --> we don't write full word
+      cmp_req.wbe   = (vrf_be_t'(1) << cmp_total_byte_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1);
+    end else begin
+      cmp_req.wdata = cmp_acc_q | cmp_part_lo;
+      // only complete destination words are emitted here
+      cmp_req.wbe   = '1;   
+    end
+  end : cmp_write_req_proc
+
+  assign cmp_req_valid = ((cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word) ||
+                         (cmp_state_q == CMP_FLUSH);
+
+  assign cmp_re = (cmp_state_q == CMP_READ_MASK_LO) || (cmp_state_q == CMP_READ_MASK_HI) || (cmp_state_q == CMP_RUN);
 
   ////////////
   // Slider //
@@ -439,7 +676,13 @@ module spatz_vsldu
   vrf_data_t data_in, data_out, data_low, data_high;
   vrf_be_t slide_wbe; // Used for monitor wbe signals before vm_masking
 
-  always_comb begin
+  // Slide-path outputs, muxed with the compress path further down
+  vrf_req_t  sld_req;
+  logic      sld_req_valid;
+  logic      sld_re;
+  vrf_addr_t sld_raddr;
+
+  always_comb begin : vsldu_slider_proc
     shift_overflow_d = shift_overflow_q;
 
     data_in   = '0;
@@ -447,8 +690,8 @@ module spatz_vsldu
     data_high = '0;
     data_low  = '0;
 
-    vrf_req_d.wbe   = '0;
-    vrf_req_d.wdata = '0;
+    sld_req.wbe   = '0;
+    sld_req.wdata = '0;
 
     slide_wbe = '0;
 
@@ -506,14 +749,14 @@ module spatz_vsldu
       // If we have a slide up operation, flip all bytes back around (d[i] = d[-i])
       if (is_slide_up) begin
         for (int b_src = 0; b_src < VRFWordBWidth; b_src++)
-          vrf_req_d.wdata[(VRFWordBWidth-b_src-1)*8 +: 8] = data_out[b_src*8 +: 8];
+          sld_req.wdata[(VRFWordBWidth-b_src-1)*8 +: 8] = data_out[b_src*8 +: 8];
 
         // Insert rs1 element at the first position
         if (spatz_req.op_sld.insert && !spatz_req.op_sld.vmv && vreg_operation_first && spatz_req.vstart == 'd0)
           // fill the LSB with rs1_masked
-          vrf_req_d.wdata = vrf_req_d.wdata | vrf_data_t'(rs1_masked);
+          sld_req.wdata = sld_req.wdata | vrf_data_t'(rs1_masked);
       end else begin
-        vrf_req_d.wdata = data_out;
+        sld_req.wdata = data_out;
       end
 
       // Create byte enable mask
@@ -530,12 +773,12 @@ module spatz_vsldu
     if (vreg_operations_finished)
       shift_overflow_d = '0;
 
-    vrf_req_d.wbe = slide_wbe & vm_masking[vreg_counter_mod_wordBwidth*VRFWordBWidth +:VRFWordBWidth];
-  end
+    sld_req.wbe = slide_wbe & vm_masking[vreg_counter_mod_wordBwidth*VRFWordBWidth +:VRFWordBWidth];
+  end : vsldu_slider_proc
 
   // VRF signals
-  assign vrf_re_o        = (vreg_operation_first_q == VREG_READ_V0_t_lo)||(vreg_operation_first_q == VREG_READ_V0_t_hi)||(spatz_req.use_vs2 && (spatz_req_valid || prefetch_q) && running_q[spatz_req.id]);
-  assign vrf_req_valid_d = (vreg_operation_first_q != VREG_READ_V0_t_lo)&&(vreg_operation_first_q != VREG_READ_V0_t_hi)&& spatz_req_valid && spatz_req.use_vd && (vrf_re_o || !spatz_req.use_vs2) && (vrf_rvalid_i || !spatz_req.use_vs2) && !prefetch_q;
+  assign sld_re        = (vreg_operation_first_q == VREG_READ_V0_t_lo)||(vreg_operation_first_q == VREG_READ_V0_t_hi)||(spatz_req.use_vs2 && (spatz_req_valid || prefetch_q) && running_q[spatz_req.id]);
+  assign sld_req_valid = (vreg_operation_first_q != VREG_READ_V0_t_lo)&&(vreg_operation_first_q != VREG_READ_V0_t_hi)&& spatz_req_valid && spatz_req.use_vd && (vrf_re_o || !spatz_req.use_vs2) && (vrf_rvalid_i || !spatz_req.use_vs2) && !prefetch_q;
 
   ////////////////////////
   // Address Generation //
@@ -543,18 +786,49 @@ module spatz_vsldu
 
   vlen_t sld_offset_rd;
   localparam int zero_fill_idx = (NrWordsPerVector > 1) ? $clog2(NrWordsPerVector) : 0;
-  vrf_addr_t base_raddr, base_waddr;
+  vrf_addr_t base_raddr, base_waddr, base_vs1_raddr;
 
-  always_comb begin
+  always_comb begin: addr_gen_proc
     base_raddr = '0;
     base_waddr = '0;
+    base_vs1_raddr = '0;
 
     base_raddr[$bits(vrf_addr_t)-1:zero_fill_idx] = spatz_req.vs2;
     base_waddr[$bits(vrf_addr_t)-1:zero_fill_idx] = spatz_req.vd;
+    //vcompress: mask is in vs1
+    base_vs1_raddr[$bits(vrf_addr_t)-1:zero_fill_idx] = spatz_req.vs1;
 
     sld_offset_rd   = is_slide_up ? (prefetch_q ? -slide_amount_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] - 1 : -slide_amount_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)]) : prefetch_q ? slide_amount_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] : slide_amount_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] + 1;
-    vrf_raddr_o     = (vreg_operation_first_q == VREG_READ_V0_t_lo) ? '0 : (vreg_operation_first_q == VREG_READ_V0_t_hi) ? vrf_addr_t'(1) : base_raddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] + sld_offset_rd;
-    vrf_req_d.waddr = base_waddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)];
-  end
+    sld_raddr       = (vreg_operation_first_q == VREG_READ_V0_t_lo) ? '0 : (vreg_operation_first_q == VREG_READ_V0_t_hi) ? vrf_addr_t'(1) : base_raddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] + sld_offset_rd;
+    sld_req.waddr   = base_waddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)];
+
+    cmp_req.waddr = base_waddr + vrf_addr_t'(((cmp_state_q == CMP_FLUSH) ? cmp_total_byte_q : cmp_start_byte) >> $clog2(VRFWordBWidth));
+
+    unique case (cmp_state_q)
+      CMP_READ_MASK_LO: cmp_raddr = base_vs1_raddr;
+      CMP_READ_MASK_HI: cmp_raddr = base_vs1_raddr + vrf_addr_t'(1);
+      default:          cmp_raddr = base_raddr + vrf_addr_t'(cmp_word_q);
+    endcase
+  end: addr_gen_proc
+
+  /////////////////
+  //  Output mux //
+  /////////////////
+
+  assign vrf_re_o        = is_compress ? cmp_re        : sld_re;
+  assign vrf_raddr_o     = is_compress ? cmp_raddr     : sld_raddr;
+  assign vrf_req_d       = is_compress ? cmp_req       : sld_req;
+  assign vrf_req_valid_d = is_compress ? cmp_req_valid : sld_req_valid;
+
+  ////////////////
+  // Assertions //
+  ////////////////
+
+  // pragma translate_off
+  initial begin : p_vsldu_assertions
+    assert (NrWordsPerVector <= 2)
+      else $fatal(1, "[spatz_vsldu] the vcompress mask fetch assumes NrWordsPerVector <= 2");
+  end : p_vsldu_assertions
+  // pragma translate_on
 
 endmodule : spatz_vsldu
