@@ -178,11 +178,11 @@ module spatz_vsldu
   // Source word currently being read, and how many of them there are
   vlen_t cmp_word_q, cmp_word_d;
   `FF(cmp_word_q, cmp_word_d, '0)
-  
+
   // Number of source words to read
   vlen_t cmp_num_words;
 
-  // mask register vs1 read from vs1 
+  // mask register vs1 read from vs1
   vrf_data_t cmp_mask_lo_q, cmp_mask_hi_q;
   logic [VLEN-1:0] cmp_mask;
 
@@ -493,7 +493,7 @@ module spatz_vsldu
       end
       default:;
     endcase
-    
+
     // vcompress does not use this FSM, so it is frozen in the idle state
     if (is_compress) begin
       vreg_operation_first   = 1'b0;
@@ -649,7 +649,7 @@ module spatz_vsldu
     end else begin
       cmp_req.wdata = cmp_acc_q | cmp_part_lo;
       // only complete destination words are emitted here
-      cmp_req.wbe   = '1;   
+      cmp_req.wbe   = '1;
     end
   end : cmp_write_req_proc
 
