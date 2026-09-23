@@ -1782,7 +1782,7 @@ module spatz_decoder
 
         // Scalar single-precision floating-point instructions
         riscv_instr::FDIV_S,
-        riscv_instr::FSQRT_S,        
+        riscv_instr::FSQRT_S,
         riscv_instr::FADD_S,
         riscv_instr::FSUB_S,
         riscv_instr::FMUL_S,

@@ -551,7 +551,7 @@ module spatz_vfu
   logic [N_FU*ELEN-1:0] cmp_mask_dst_lo, cmp_mask_dst_lo_q;
   logic [N_FU*ELEN-1:0] cmp_mask_dst_hi, cmp_mask_dst_hi_q;
 
-    // The signal to choose comparison instructions  
+    // The signal to choose comparison instructions
   logic is_cmp_req;
   assign is_cmp_req = (spatz_req.op == VFCMP) || spatz_req.op inside {VMSEQ, VMSNE, VMSLT, VMSLTU, VMSLE, VMSLEU, VMSGT, VMSGTU};
 
