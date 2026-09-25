@@ -7,7 +7,9 @@ Spatz is a compact vector processor based on [RISC-V's Vector Extension (RVV) v1
 
 ## Documentation
 
-The specification of the standalone `spatz` top level (interfaces, parameters and configuration flow, supported instructions, architecture and verification notes) is in [docs/SPATZ_SPEC.md](docs/SPATZ_SPEC.md).
+The specification of the standalone `spatz` top level (interfaces, parameters and configuration flow, supported instructions, architecture) is in [docs/SPATZ_SPEC.md](docs/SPATZ_SPEC.md).
+
+The verification plan (specification analysis, open questions, plan items and configuration space) is in [docs/vplan/SPATZ_VERIFICATION_PLAN.md](docs/vplan/SPATZ_VERIFICATION_PLAN.md), with the plan spreadsheet [docs/vplan/SPATZ_VERIFICATION_PLAN.xlsx](docs/vplan/SPATZ_VERIFICATION_PLAN.xlsx).
 
 ## Getting started
 
