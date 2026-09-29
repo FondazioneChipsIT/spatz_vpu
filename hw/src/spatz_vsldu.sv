@@ -182,11 +182,6 @@ module spatz_vsldu
   // Number of source words to read
   vlen_t cmp_num_words;
 
-  // Mask register read from vs1. It is shifted right by one word worth of
-  // elements on every advance, so the current word's bits are always at the LSBs
-  logic [VLEN-1:0] cmp_mask_q, cmp_mask_d;
-  `FF(cmp_mask_q, cmp_mask_d, '0)
-
   // Byte-enable of the valid (body) bytes of the current source word
   logic [VRFWordBWidth-1:0] cmp_tail_be;
 
@@ -310,27 +305,46 @@ module spatz_vsldu
       prefetch_d = 1'b0;
   end : vsldu_new_request_proc
 
+  ////////////////////
+  //  Mask operand  //
+  ////////////////////
+
+  logic v0_t_lo_is_ready,v0_t_hi_is_ready;
+  logic v0_t_lo_read_done,v0_t_hi_read_done;
+
+  assign v0_t_lo_is_ready   = (vreg_operation_first_q == VREG_READ_V0_t_lo) && vrf_rvalid_i;
+  assign v0_t_hi_is_ready   = (vreg_operation_first_q == VREG_READ_V0_t_hi) && vrf_rvalid_i;
+
+  // vcompress overwrites the mask operand with vs1: force a new v0 read for the next masked slide
+  `FFLARNC(v0_t_lo_read_done,1'b1,v0_t_lo_is_ready,vsldu_rsp_valid_o || new_compress_request,1'b0,clk_i,rst_ni);
+  `FFLARNC(v0_t_hi_read_done,1'b1,v0_t_hi_is_ready,vsldu_rsp_valid_o || new_compress_request,1'b0,clk_i,rst_ni);
+
+  // Mask operand, read from VRF as at most two VRF words:
+  //  - masked slides: v0.t
+  //  - vcompress: vs1 
+  // It is shifted right by one word worth of elements on every advance, so the current source word's bits are always at the LSBs
+  logic [VLEN-1:0] operand_mask_q, operand_mask_d;
+  `FF(operand_mask_q, operand_mask_d, '0)
+
+  always_comb begin : mask_reg_proc
+    operand_mask_d = operand_mask_q;
+
+    if (v0_t_lo_is_ready || ((cmp_state_q == CMP_READ_MASK_LO) && vrf_rvalid_i))
+      operand_mask_d[VRFWordWidth-1:0] = vrf_rdata_i;
+    else if ((v0_t_hi_is_ready || ((cmp_state_q == CMP_READ_MASK_HI) && vrf_rvalid_i)) && (NrWordsPerVector > 1))
+      operand_mask_d[VLEN-1 -: VRFWordWidth] = vrf_rdata_i;
+    else if (cmp_advance)
+      unique case (spatz_req.vtype.vsew)
+        EW_8   : operand_mask_d = operand_mask_q >> (VRFWordBWidth);
+        EW_16  : operand_mask_d = operand_mask_q >> (VRFWordBWidth/2);
+        EW_32  : operand_mask_d = operand_mask_q >> (VRFWordBWidth/4);
+        default: operand_mask_d = operand_mask_q >> (VRFWordBWidth/8);
+      endcase
+  end : mask_reg_proc
+
   //////////////////////
   // Compress control //
   //////////////////////
-
-  // The mask register is fetched as at most two VRF words --> same as v0 for masking.
-  // While running, it drops the bits of the consumed source word on every advance
-  always_comb begin : cmp_mask_proc
-    cmp_mask_d = cmp_mask_q;
-
-    if ((cmp_state_q == CMP_READ_MASK_LO) && vrf_rvalid_i)
-      cmp_mask_d[VRFWordWidth-1:0] = vrf_rdata_i;
-    else if ((cmp_state_q == CMP_READ_MASK_HI) && vrf_rvalid_i && (NrWordsPerVector > 1))
-      cmp_mask_d[VLEN-1 -: VRFWordWidth] = vrf_rdata_i;
-    else if (cmp_advance)
-      unique case (spatz_req.vtype.vsew)
-        EW_8   : cmp_mask_d = cmp_mask_q >> (VRFWordBWidth);
-        EW_16  : cmp_mask_d = cmp_mask_q >> (VRFWordBWidth/2);
-        EW_32  : cmp_mask_d = cmp_mask_q >> (VRFWordBWidth/4);
-        default: cmp_mask_d = cmp_mask_q >> (VRFWordBWidth/8);
-      endcase
-  end : cmp_mask_proc
 
   // Only the last source word can be partially filled
   assign cmp_tail_be = (cmp_last_word && (spatz_req.vl[$clog2(VRFWordBWidth)-1:0] != '0)) ?
@@ -405,29 +419,6 @@ module spatz_vsldu
   logic vreg_operation_first;
   logic vreg_operation_last;
 
-  logic v0_t_lo_is_ready,v0_t_hi_is_ready;
-  logic v0_t_lo_read_done,v0_t_hi_read_done;
-
-  assign v0_t_lo_is_ready   = (vreg_operation_first_q == VREG_READ_V0_t_lo) && vrf_rvalid_i;
-  assign v0_t_hi_is_ready   = (vreg_operation_first_q == VREG_READ_V0_t_hi) && vrf_rvalid_i;
-
-  `FFLARNC(v0_t_lo_read_done,1'b1,v0_t_lo_is_ready,vsldu_rsp_valid_o,1'b0,clk_i,rst_ni);
-  `FFLARNC(v0_t_hi_read_done,1'b1,v0_t_hi_is_ready,vsldu_rsp_valid_o,1'b0,clk_i,rst_ni);
-
-  // v0 should be read from VRF
-  vrf_data_t  operand_v0_t_lo,operand_v0_t_lo_q;
-  vrf_data_t  operand_v0_t_hi,operand_v0_t_hi_q;
-
-  assign operand_v0_t_lo = (vreg_operation_first_q == VREG_READ_V0_t_lo)? vrf_rdata_i:'0;
-  assign operand_v0_t_hi = (vreg_operation_first_q == VREG_READ_V0_t_hi)? vrf_rdata_i:'0;
-
-  // Backup v0.t
-  `FFL(operand_v0_t_lo_q, operand_v0_t_lo, v0_t_lo_is_ready, '0)
-  `FFL(operand_v0_t_hi_q, operand_v0_t_hi, v0_t_hi_is_ready, '0)
-
-  logic [VLEN-1:0] operand_v0_t_q;
-  assign operand_v0_t_q = {operand_v0_t_hi_q,operand_v0_t_lo_q};
-
   // Generate masking based on v0.t
   logic [VLEN-1:0] vm_masking;
 
@@ -437,16 +428,16 @@ module spatz_vsldu
       case (spatz_req.vtype.vsew)
         // i < (VLEN/vsew)*8 where 8 --> max lmul
         EW_8:for(int i=0;i<VLEN;i=i+1)begin
-          vm_masking[i*1+:1] = {1{operand_v0_t_q[i]}};
+          vm_masking[i*1+:1] = {1{operand_mask_q[i]}};
         end
         EW_16:for(int i=0;i<(VLEN/2);i=i+1)begin
-          vm_masking[i*2+:2] = {2{operand_v0_t_q[i]}};
+          vm_masking[i*2+:2] = {2{operand_mask_q[i]}};
         end
         EW_32: for(int i=0;i<(VLEN/4);i=i+1)begin
-          vm_masking[i*4+:4] = {4{operand_v0_t_q[i]}};
+          vm_masking[i*4+:4] = {4{operand_mask_q[i]}};
         end
         default: if (MAXEW == EW_64) for(int i=0;i<(VLEN/8);i=i+1)begin
-          vm_masking[i*8+:8] = {8{operand_v0_t_q[i]}};
+          vm_masking[i*8+:8] = {8{operand_mask_q[i]}};
         end
       endcase
     end
@@ -620,9 +611,9 @@ module spatz_vsldu
     cmp_shifted_data = '0;
     j = 0;
 
-    // select bytes in the chunk: the current word's mask bits are at the LSBs of cmp_mask_q
+    // select bytes in the chunk: the current word's mask bits are at the LSBs of operand_mask_q
     for (int b = 0; b < VRFWordBWidth; b++) begin
-      cmp_mask_q[b >> spatz_req.vtype.vsew]
+      cmp_chunk_be[b] = operand_mask_q[b >> spatz_req.vtype.vsew];
     end
     cmp_chunk_be &= cmp_tail_be;
     // count valid elements in the chunk
