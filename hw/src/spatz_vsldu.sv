@@ -207,7 +207,7 @@ module spatz_vsldu
   logic [$clog2(VRFWordBWidth)-1:0] cmp_offset;
   logic                             cmp_emit_word;
 
-  // Datapath: the compacted word is aligned by the slider shifter, and the
+  // the compacted word is aligned by the slider shifter and the
   // partial destination word is accumulated in the slider overflow register
   vrf_data_t compact_data;
 
@@ -599,12 +599,25 @@ module spatz_vsldu
     end
   end : cmp_counters_proc
 
+  // Compaction network: each selected byte moves down by the number of discarded bytes
+  // before it (its shift amount). The move is split in log2(VRFWordBWidth) stages, where
+  // stage k moves a byte down by 2^k if bit k of its shift amount is set. Processing the
+  // bits LSB first keeps the byte order and never makes two selected bytes collide.
+  localparam int unsigned CmpNetStages = $clog2(VRFWordBWidth);
+
+  logic      [CmpNetStages:0][VRFWordBWidth-1:0]                   cmp_net_valid;
+  vrf_data_t [CmpNetStages:0]                                      cmp_net_data;
+  logic      [CmpNetStages:0][VRFWordBWidth-1:0][CmpNetStages-1:0] cmp_net_shamt;
+
   always_comb begin : cmp_chunk_mask_proc
-    automatic int unsigned j;
+    automatic logic [CmpNetStages-1:0] discarded;
     cmp_chunk_be  = '0;
     cmp_chunk_cnt = '0;
     compact_data  = '0;
-    j = 0;
+    cmp_net_valid = '0;
+    cmp_net_data  = '0;
+    cmp_net_shamt = '0;
+    discarded     = '0;
 
     // select bytes in the chunk: the current word's mask bits are at the LSBs of operand_mask_q
     for (int b = 0; b < VRFWordBWidth; b++) begin
@@ -617,11 +630,28 @@ module spatz_vsldu
         cmp_chunk_cnt = cmp_chunk_cnt + vlen_t'(cmp_chunk_be[e << spatz_req.vtype.vsew]);
     // compact read data
     for (int i = 0; i < VRFWordBWidth; i++) begin
-      if (cmp_chunk_be[i]) begin
-        compact_data[j*8+:8] = vrf_rdata_i[i*8+:8];
-        j=j+1;
-      end
+      cmp_net_valid[0][i]      = cmp_chunk_be[i];
+      cmp_net_data[0][i*8 +: 8] = cmp_chunk_be[i] ? vrf_rdata_i[i*8 +: 8] : 8'h00;
+      cmp_net_shamt[0][i]      = discarded;
+      discarded                = discarded + CmpNetStages'(!cmp_chunk_be[i]);
     end
+    for (int k = 0; k < CmpNetStages; k++)
+      for (int p = 0; p < VRFWordBWidth; p++) begin
+        // The byte already at p stays there
+        if (cmp_net_valid[k][p] && !cmp_net_shamt[k][p][k]) begin
+          cmp_net_valid[k+1][p]         = 1'b1;
+          cmp_net_data[k+1][p*8 +: 8]   = cmp_net_data[k][p*8 +: 8];
+          cmp_net_shamt[k+1][p]         = cmp_net_shamt[k][p];
+        end
+        // The byte at p + 2^k moves down to p
+        if (p + (1 << k) < VRFWordBWidth)
+          if (cmp_net_valid[k][p + (1 << k)] && cmp_net_shamt[k][p + (1 << k)][k]) begin
+            cmp_net_valid[k+1][p]       = 1'b1;
+            cmp_net_data[k+1][p*8 +: 8] = cmp_net_data[k][(p + (1 << k))*8 +: 8];
+            cmp_net_shamt[k+1][p]       = cmp_net_shamt[k][p + (1 << k)];
+          end
+      end
+    compact_data = cmp_net_data[CmpNetStages];
   end : cmp_chunk_mask_proc
 
   // The write data comes from the slider (compacted word shifted by cmp_offset, merged
