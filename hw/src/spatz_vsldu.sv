@@ -194,7 +194,13 @@ module spatz_vsldu
   // Byte-enable mask of the current source word
   logic [VRFWordBWidth-1:0] cmp_chunk_be;
 
+  // Is the current source word the last one?
   logic  cmp_last_word;
+  logic  cmp_last_word_q, cmp_last_word_d;
+  `FF(cmp_last_word_q, cmp_last_word_d, 1'b0)
+
+  // Are the mask bits in the upper VRF word of vs1 needed?
+  logic  cmp_need_mask_hi;
 
   // Per-word derived quantities
   vlen_t                            cmp_chunk_bytes;
@@ -342,19 +348,29 @@ module spatz_vsldu
   assign cmp_tail_be = (cmp_last_word && (spatz_req.vl[$clog2(VRFWordBWidth)-1:0] != '0)) ?
                        (vrf_be_t'(1) << spatz_req.vl[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
 
-  // vl is in bytes
-  assign cmp_last_word = (vreg_counter_q + vlen_t'(VRFWordBWidth)) >= spatz_req.vl;
+  always_comb begin : cmp_last_word_proc
+    cmp_last_word_d = cmp_last_word_q;
+
+    if (new_compress_request)
+      cmp_last_word_d = spatz_req.vl <= vlen_t'(VRFWordBWidth);
+    else if (cmp_advance)
+      cmp_last_word_d = (vreg_counter_q + vlen_t'(2*VRFWordBWidth)) >= spatz_req.vl;
+  end : cmp_last_word_proc
+
+  assign cmp_last_word = cmp_last_word_q;
+
+  // The upper mask word holds the bits of elements VRFWordWidth and above
+  assign cmp_need_mask_hi = (spatz_req.vl >> spatz_req.vtype.vsew) > vlen_t'(VRFWordWidth);
 
   assign cmp_end_byte   = cmp_base_q + cmp_chunk_bytes;
   assign cmp_offset     = cmp_base_q[$clog2(VRFWordBWidth)-1:0];
   assign cmp_emit_word  = (cmp_end_byte >> $clog2(VRFWordBWidth)) != (cmp_base_q >> $clog2(VRFWordBWidth));
 
-  // A final write is needed whenever the total is not a multiple of a VRF word, or when
-  // the last source word does not emit: the response FSM waits for a write after the end
-  assign cmp_need_flush = (cmp_end_byte[$clog2(VRFWordBWidth)-1:0] != '0) || !cmp_emit_word;
+  // flush when last word is emitted and there are remaining bytes, so when the 2 more writes are needed
+  assign cmp_need_flush = cmp_emit_word && (cmp_end_byte[$clog2(VRFWordBWidth)-1:0] != '0);
 
-  // An emit that the output register cannot take freezes the read counter, the prefix sum and the accumulator
-  assign cmp_stall   = (cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word && !vrf_req_ready_d;
+  // A write that the output register cannot take freezes the read counter, the prefix sum and the accumulator
+  assign cmp_stall   = (cmp_state_q == CMP_RUN) && vrf_rvalid_i && (cmp_emit_word || cmp_last_word) && !vrf_req_ready_d;
   assign cmp_advance = (cmp_state_q == CMP_RUN) && vrf_rvalid_i && !cmp_stall;
 
   assign cmp_finished = (cmp_advance && cmp_last_word && !cmp_need_flush) || ((cmp_state_q == CMP_FLUSH) && vrf_req_ready_d);
@@ -370,7 +386,7 @@ module spatz_vsldu
 
       CMP_READ_MASK_LO: begin
         if (vrf_rvalid_i)
-          cmp_state_d = (NrWordsPerVector > 1) ? CMP_READ_MASK_HI : CMP_RUN;
+          cmp_state_d = (NrWordsPerVector > 1 && cmp_need_mask_hi) ? CMP_READ_MASK_HI : CMP_RUN;
       end
 
       CMP_READ_MASK_HI: begin
@@ -636,13 +652,17 @@ module spatz_vsldu
     compact_data = cmp_net_data[CmpNetStages];
   end : cmp_chunk_mask_proc
 
-  // The write data comes from the slider (compacted word shifted by cmp_offset, merged
-  // with the partial destination word kept in shift_overflow_q)
-  // wbe != '1 only in flush state --> we don't write the full word
-  assign cmp_wbe = (cmp_state_q == CMP_FLUSH) ?
-                   (vrf_be_t'(1) << cmp_base_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
+  // Partial destination words (wbe != '1) are written by the flush, or directly by a last
+  // source word that does not emit
+  always_comb begin : cmp_wbe_proc
+    cmp_wbe = '1;
+    if (cmp_state_q == CMP_FLUSH)
+      cmp_wbe = (vrf_be_t'(1) << cmp_base_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1);
+    else if (cmp_last_word && !cmp_emit_word)
+      cmp_wbe = (vrf_be_t'(1) << cmp_end_byte[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1);
+  end : cmp_wbe_proc
 
-  assign cmp_req_valid = ((cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word) ||
+  assign cmp_req_valid = ((cmp_state_q == CMP_RUN) && vrf_rvalid_i && (cmp_emit_word || cmp_last_word)) ||
                          (cmp_state_q == CMP_FLUSH);
 
   assign cmp_re = (cmp_state_q == CMP_READ_MASK_LO) || (cmp_state_q == CMP_READ_MASK_HI) || (cmp_state_q == CMP_RUN);
