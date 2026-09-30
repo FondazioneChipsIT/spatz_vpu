@@ -309,13 +309,16 @@ module spatz_vsldu
 
   logic v0_t_lo_is_ready,v0_t_hi_is_ready;
   logic v0_t_lo_read_done,v0_t_hi_read_done;
+  logic v0_t_read_clear;
 
   assign v0_t_lo_is_ready   = (vreg_operation_first_q == VREG_READ_V0_t_lo) && vrf_rvalid_i;
   assign v0_t_hi_is_ready   = (vreg_operation_first_q == VREG_READ_V0_t_hi) && vrf_rvalid_i;
 
+  assign v0_t_read_clear = vsldu_rsp_valid_o || new_compress_request;
+
   // vcompress overwrites the mask operand with vs1: force a new v0 read for the next masked slide
-  `FFLARNC(v0_t_lo_read_done,1'b1,v0_t_lo_is_ready,vsldu_rsp_valid_o || new_compress_request,1'b0,clk_i,rst_ni);
-  `FFLARNC(v0_t_hi_read_done,1'b1,v0_t_hi_is_ready,vsldu_rsp_valid_o || new_compress_request,1'b0,clk_i,rst_ni);
+  `FFLARNC(v0_t_lo_read_done,1'b1,v0_t_lo_is_ready,v0_t_read_clear,1'b0,clk_i,rst_ni);
+  `FFLARNC(v0_t_hi_read_done,1'b1,v0_t_hi_is_ready,v0_t_read_clear,1'b0,clk_i,rst_ni);
 
   // Mask operand, read from VRF as at most two VRF words:
   //  - masked slides: v0.t
