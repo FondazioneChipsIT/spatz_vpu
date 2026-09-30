@@ -201,24 +201,21 @@ module spatz_vsldu
 
   logic  cmp_last_word;
 
-  // accumulator
-  vrf_data_t cmp_acc_q, cmp_acc_d;
-  `FF(cmp_acc_q, cmp_acc_d, '0)
-
   // Per-word derived quantities
   vlen_t                            cmp_chunk_cnt;
   vlen_t                            cmp_start_byte, cmp_end_byte;
   logic [$clog2(VRFWordBWidth)-1:0] cmp_offset;
   logic                             cmp_emit_word;
 
-  // Datapath
-  vrf_data_t cmp_part_lo, cmp_part_hi;
+  // Datapath: the compacted word is aligned by the slider shifter, and the
+  // partial destination word is accumulated in the slider overflow register
+  vrf_data_t compact_data;
 
   // Control
   logic      cmp_need_flush, cmp_stall, cmp_advance;
   logic      cmp_re, cmp_req_valid;
-  vrf_addr_t cmp_raddr;
-  vrf_req_t  cmp_req;
+  vrf_addr_t cmp_raddr, cmp_waddr;
+  vrf_be_t   cmp_wbe;
 
   ///////////////////
   // State Handler //
@@ -358,8 +355,9 @@ module spatz_vsldu
   assign cmp_offset     = cmp_start_byte[$clog2(VRFWordBWidth)-1:0];
   assign cmp_emit_word  = (cmp_end_byte >> $clog2(VRFWordBWidth)) != (cmp_start_byte >> $clog2(VRFWordBWidth));
 
-  // A final partial write is needed whenever the total is not a multiple of a VRF word
-  assign cmp_need_flush = (cmp_end_byte[$clog2(VRFWordBWidth)-1:0] != '0) || (cmp_end_byte == '0);
+  // A final write is needed whenever the total is not a multiple of a VRF word, or when
+  // the last source word does not emit: the response FSM waits for a write after the end
+  assign cmp_need_flush = (cmp_end_byte[$clog2(VRFWordBWidth)-1:0] != '0) || !cmp_emit_word;
 
   // An emit that the output register cannot take freezes the read counter, the prefix sum and the accumulator
   assign cmp_stall   = (cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word && !vrf_req_ready_d;
@@ -579,8 +577,6 @@ module spatz_vsldu
   ///////////////////////
   // Compress datapath //
   ///////////////////////
-  vrf_data_t compact_data;
-  logic [$bits(compact_data)*2-1:0] cmp_shifted_data;
 
   assign cmp_elem_per_word = vlen_t'(VRFWordBWidth) >> spatz_req.vtype.vsew;
 
@@ -608,7 +604,6 @@ module spatz_vsldu
     cmp_chunk_be  = '0;
     cmp_chunk_cnt = '0;
     compact_data  = '0;
-    cmp_shifted_data = '0;
     j = 0;
 
     // select bytes in the chunk: the current word's mask bits are at the LSBs of operand_mask_q
@@ -627,35 +622,13 @@ module spatz_vsldu
         j=j+1;
       end
     end
-    // extend in a larger signal and apply the offset
-    cmp_shifted_data = {{$bits(compact_data){1'b0}}, compact_data} << {cmp_offset, 3'b000};
-    // select part_hi and part_lo
-    cmp_part_hi = cmp_shifted_data[$bits(compact_data)*2-1:$bits(compact_data)];
-    cmp_part_lo = cmp_shifted_data[$bits(compact_data)-1:0];
   end : cmp_chunk_mask_proc
 
-  always_comb begin : cmp_accumulator_proc
-    cmp_acc_d = cmp_acc_q;
-
-    if (new_compress_request)
-      cmp_acc_d = '0;
-    else if (cmp_advance)
-      cmp_acc_d = cmp_emit_word ? cmp_part_hi : (cmp_acc_q | cmp_part_lo);
-    else if ((cmp_state_q == CMP_FLUSH) && vrf_req_ready_d)
-      cmp_acc_d = '0;
-  end : cmp_accumulator_proc
-
-  always_comb begin : cmp_write_req_proc
-    if (cmp_state_q == CMP_FLUSH) begin
-      cmp_req.wdata = cmp_acc_q;
-      // wbe != '1 if we are in flush state --> we don't write full word
-      cmp_req.wbe   = (vrf_be_t'(1) << cmp_total_byte_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1);
-    end else begin
-      cmp_req.wdata = cmp_acc_q | cmp_part_lo;
-      // only complete destination words are emitted here
-      cmp_req.wbe   = '1;
-    end
-  end : cmp_write_req_proc
+  // The write data comes from the slider (compacted word shifted by cmp_offset, merged
+  // with the partial destination word kept in shift_overflow_q)
+  // wbe != '1 only in flush state --> we don't write the full word
+  assign cmp_wbe = (cmp_state_q == CMP_FLUSH) ?
+                   (vrf_be_t'(1) << cmp_total_byte_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
 
   assign cmp_req_valid = ((cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word) ||
                          (cmp_state_q == CMP_FLUSH);
@@ -673,14 +646,15 @@ module spatz_vsldu
   // Number of bytes we have to shift the elements around
   // inside the register element
   logic [$clog2(VRFWordBWidth)-1:0] in_elem_offset, in_elem_flipped_offset;
-  assign in_elem_offset         = slide_amount_d[$clog2(VRFWordBWidth)-1:0];
+  // vcompress shifts the compacted word up by the destination byte offset
+  assign in_elem_offset         = is_compress ? cmp_offset : slide_amount_d[$clog2(VRFWordBWidth)-1:0];
   assign in_elem_flipped_offset = VRFWordBWidth - in_elem_offset;
 
   // Data signals for different stages of the shift
   vrf_data_t data_in, data_out, data_low, data_high;
   vrf_be_t slide_wbe; // Used for monitor wbe signals before vm_masking
 
-  // Slide-path outputs, muxed with the compress path further down
+  // Slide-path outputs, muxed with the compress path further down (wdata is shared)
   vrf_req_t  sld_req;
   logic      sld_req_valid;
   logic      sld_re;
@@ -701,7 +675,13 @@ module spatz_vsldu
 
     // Is there a vector instruction executing now?
     if (!is_vl_zero) begin
-        if (is_slide_up && spatz_req.op_sld.insert && spatz_req.op_sld.vmv) begin
+        if (is_compress) begin
+          // vcompress uses the slide up datapath: flip the compacted bytes around (d[-i] = d[i])
+          if (cmp_state_q == CMP_RUN)
+            for (int b_src = 0; b_src < VRFWordBWidth; b_src++)
+              data_in[(VRFWordBWidth-b_src-1)*8 +: 8] = compact_data[b_src*8 +: 8];
+        end
+        else if (is_slide_up && spatz_req.op_sld.insert && spatz_req.op_sld.vmv) begin
           for (int b_src = 0; b_src < VRFWordBWidth; b_src++)
             data_in[(VRFWordBWidth-b_src-1)*8 +: 8] = spatz_req.rs1[b_src*8%ELEN +: 8];
         end
@@ -732,7 +712,13 @@ module spatz_vsldu
         end
 
       // Combine overflow and direct elements together
-      if (is_slide_up) begin
+      if (is_compress) begin
+        // The overflow register holds the partial destination word: the bytes spilling
+        // into the next word replace it on emit, otherwise the new bytes are merged in
+        if (cmp_advance)
+          shift_overflow_d = cmp_emit_word ? data_low : (shift_overflow_q | data_high);
+        data_out = data_high | shift_overflow_q;
+      end else if (is_slide_up) begin
         if (vreg_counter_en || prefetch_q)
           shift_overflow_d = data_low;
         data_out = data_high | shift_overflow_q;
@@ -751,7 +737,7 @@ module spatz_vsldu
       end
 
       // If we have a slide up operation, flip all bytes back around (d[i] = d[-i])
-      if (is_slide_up) begin
+      if (is_slide_up || is_compress) begin
         for (int b_src = 0; b_src < VRFWordBWidth; b_src++)
           sld_req.wdata[(VRFWordBWidth-b_src-1)*8 +: 8] = data_out[b_src*8 +: 8];
 
@@ -774,7 +760,7 @@ module spatz_vsldu
     end
 
     // Reset overflow register when finished
-    if (vreg_operations_finished)
+    if (vreg_operations_finished || new_compress_request || cmp_finished)
       shift_overflow_d = '0;
 
     sld_req.wbe = slide_wbe & vm_masking[vreg_counter_mod_wordBwidth*VRFWordBWidth +:VRFWordBWidth];
@@ -806,7 +792,7 @@ module spatz_vsldu
     sld_raddr       = (vreg_operation_first_q == VREG_READ_V0_t_lo) ? '0 : (vreg_operation_first_q == VREG_READ_V0_t_hi) ? vrf_addr_t'(1) : base_raddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] + sld_offset_rd;
     sld_req.waddr   = base_waddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)];
 
-    cmp_req.waddr = base_waddr + vrf_addr_t'(((cmp_state_q == CMP_FLUSH) ? cmp_total_byte_q : cmp_start_byte) >> $clog2(VRFWordBWidth));
+    cmp_waddr     = base_waddr + vrf_addr_t'(((cmp_state_q == CMP_FLUSH) ? cmp_total_byte_q : cmp_start_byte) >> $clog2(VRFWordBWidth));
 
     unique case (cmp_state_q)
       CMP_READ_MASK_LO: cmp_raddr = base_vs1_raddr;
@@ -821,7 +807,9 @@ module spatz_vsldu
 
   assign vrf_re_o        = is_compress ? cmp_re        : sld_re;
   assign vrf_raddr_o     = is_compress ? cmp_raddr     : sld_raddr;
-  assign vrf_req_d       = is_compress ? cmp_req       : sld_req;
+  assign vrf_req_d.wdata = sld_req.wdata;
+  assign vrf_req_d.waddr = is_compress ? cmp_waddr     : sld_req.waddr;
+  assign vrf_req_d.wbe   = is_compress ? cmp_wbe       : sld_req.wbe;
   assign vrf_req_valid_d = is_compress ? cmp_req_valid : sld_req_valid;
 
   ////////////////
