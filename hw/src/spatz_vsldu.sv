@@ -151,6 +151,14 @@ module spatz_vsldu
   logic ops_finished;
   assign ops_finished = is_compress ? cmp_finished : vreg_operations_finished;
 
+  // Vector register file counter signals (byte index of the current VRF word,
+  // used by both the slide and the compress paths)
+  logic  vreg_counter_en;
+  vlen_t vreg_counter_delta;
+  vlen_t vreg_counter_d;
+  vlen_t vreg_counter_q;
+  `FF(vreg_counter_q, vreg_counter_d, '0)
+
   // Is the vector length zero (no active instruction)
   logic is_vl_zero;
   assign is_vl_zero = spatz_req.vl == 'd0;
@@ -175,26 +183,13 @@ module spatz_vsldu
   // Compressor signals //
   ////////////////////////
 
-  // Source word currently being read, and how many of them there are
-  vlen_t cmp_word_q, cmp_word_d;
-  `FF(cmp_word_q, cmp_word_d, '0)
-
-  // Number of source words to read
-  vlen_t cmp_num_words;
-
   // Byte-enable of the valid (body) bytes of the current source word
   logic [VRFWordBWidth-1:0] cmp_tail_be;
 
-  // active elements before the current word
+  // Destination bytes written by the previous source words. After the last source word
+  // it holds the total number of destination bytes, used by the final flush
   vlen_t cmp_base_q, cmp_base_d;
   `FF(cmp_base_q, cmp_base_d, '0)
-
-  // Total number of destination bytes, latched on the last source word
-  vlen_t cmp_total_byte_q, cmp_total_byte_d;
-  `FF(cmp_total_byte_q, cmp_total_byte_d, '0)
-
-  // Number of elements per source word
-  vlen_t cmp_elem_per_word;
 
   // Byte-enable mask of the current source word
   logic [VRFWordBWidth-1:0] cmp_chunk_be;
@@ -202,8 +197,8 @@ module spatz_vsldu
   logic  cmp_last_word;
 
   // Per-word derived quantities
-  vlen_t                            cmp_chunk_cnt;
-  vlen_t                            cmp_start_byte, cmp_end_byte;
+  vlen_t                            cmp_chunk_bytes;
+  vlen_t                            cmp_end_byte;
   logic [$clog2(VRFWordBWidth)-1:0] cmp_offset;
   logic                             cmp_emit_word;
 
@@ -347,13 +342,12 @@ module spatz_vsldu
   assign cmp_tail_be = (cmp_last_word && (spatz_req.vl[$clog2(VRFWordBWidth)-1:0] != '0)) ?
                        (vrf_be_t'(1) << spatz_req.vl[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
 
-  assign cmp_num_words = (spatz_req.vl + vlen_t'(VRFWordBWidth) - 1) >> $clog2(VRFWordBWidth);
-  assign cmp_last_word = (cmp_word_q + 1) >= cmp_num_words;
+  // vl is in bytes
+  assign cmp_last_word = (vreg_counter_q + vlen_t'(VRFWordBWidth)) >= spatz_req.vl;
 
-  assign cmp_start_byte = cmp_base_q << spatz_req.vtype.vsew;
-  assign cmp_end_byte   = (cmp_base_q + cmp_chunk_cnt) << spatz_req.vtype.vsew;
-  assign cmp_offset     = cmp_start_byte[$clog2(VRFWordBWidth)-1:0];
-  assign cmp_emit_word  = (cmp_end_byte >> $clog2(VRFWordBWidth)) != (cmp_start_byte >> $clog2(VRFWordBWidth));
+  assign cmp_end_byte   = cmp_base_q + cmp_chunk_bytes;
+  assign cmp_offset     = cmp_base_q[$clog2(VRFWordBWidth)-1:0];
+  assign cmp_emit_word  = (cmp_end_byte >> $clog2(VRFWordBWidth)) != (cmp_base_q >> $clog2(VRFWordBWidth));
 
   // A final write is needed whenever the total is not a multiple of a VRF word, or when
   // the last source word does not emit: the response FSM waits for a write after the end
@@ -401,13 +395,6 @@ module spatz_vsldu
   /////////////////////
   //  Slide control  //
   /////////////////////
-
-  // Vector register file counter signals
-  logic  vreg_counter_en;
-  vlen_t vreg_counter_delta;
-  vlen_t vreg_counter_d;
-  vlen_t vreg_counter_q;
-  `FF(vreg_counter_q, vreg_counter_d, '0)
 
   // Count how many VRFWords we have already committed
   logic [$bits(vlen_t)-$clog2(VRFWordBWidth):0] vreg_counter_mod_wordBwidth;
@@ -529,6 +516,14 @@ module spatz_vsldu
         vreg_counter_d = vreg_counter_q + vreg_counter_delta;
     end
 
+    // vcompress reads one full source word per advance
+    if (is_compress) begin
+      if (new_vsldu_request)
+        vreg_counter_d = '0;
+      else if (cmp_advance)
+        vreg_counter_d = cmp_last_word ? '0 : vreg_counter_q + vlen_t'(VRFWordBWidth);
+    end
+
     // Did we finish?
     vreg_operations_finished = vreg_operation_last && vreg_counter_en;
   end: vsldu_vreg_counter_proc
@@ -578,25 +573,13 @@ module spatz_vsldu
   // Compress datapath //
   ///////////////////////
 
-  assign cmp_elem_per_word = vlen_t'(VRFWordBWidth) >> spatz_req.vtype.vsew;
-
   always_comb begin : cmp_counters_proc
-    cmp_word_d       = cmp_word_q;
-    cmp_base_d       = cmp_base_q;
-    cmp_total_byte_d = cmp_total_byte_q;
+    cmp_base_d = cmp_base_q;
 
-    if (new_compress_request) begin
-      cmp_word_d       = '0;
-      cmp_base_d       = '0;
-      cmp_total_byte_d = '0;
-
-    end else if (cmp_advance) begin
-      cmp_base_d = cmp_base_q + cmp_chunk_cnt;
-      if (!cmp_last_word)
-        cmp_word_d = cmp_word_q + 1;
-      else
-        cmp_total_byte_d = cmp_end_byte;
-    end
+    if (new_compress_request)
+      cmp_base_d = '0;
+    else if (cmp_advance)
+      cmp_base_d = cmp_end_byte;
   end : cmp_counters_proc
 
   // Compaction network: each selected byte moves down by the number of discarded bytes
@@ -610,9 +593,10 @@ module spatz_vsldu
   logic      [CmpNetStages:0][VRFWordBWidth-1:0][CmpNetStages-1:0] cmp_net_shamt;
 
   always_comb begin : cmp_chunk_mask_proc
-    automatic logic [CmpNetStages-1:0] discarded;
-    cmp_chunk_be  = '0;
-    cmp_chunk_cnt = '0;
+    // One bit wider than the shift amounts: all the bytes of the word can be discarded
+    automatic logic [CmpNetStages:0] discarded;
+    cmp_chunk_be    = '0;
+    cmp_chunk_bytes = '0;
     compact_data  = '0;
     cmp_net_valid = '0;
     cmp_net_data  = '0;
@@ -624,17 +608,15 @@ module spatz_vsldu
       cmp_chunk_be[b] = operand_mask_q[b >> spatz_req.vtype.vsew];
     end
     cmp_chunk_be &= cmp_tail_be;
-    // count valid elements in the chunk
-    for (int e = 0; e < VRFWordBWidth; e++)
-      if (vlen_t'(e) < cmp_elem_per_word)
-        cmp_chunk_cnt = cmp_chunk_cnt + vlen_t'(cmp_chunk_be[e << spatz_req.vtype.vsew]);
     // compact read data
     for (int i = 0; i < VRFWordBWidth; i++) begin
       cmp_net_valid[0][i]      = cmp_chunk_be[i];
       cmp_net_data[0][i*8 +: 8] = cmp_chunk_be[i] ? vrf_rdata_i[i*8 +: 8] : 8'h00;
-      cmp_net_shamt[0][i]      = discarded;
-      discarded                = discarded + CmpNetStages'(!cmp_chunk_be[i]);
+      cmp_net_shamt[0][i]      = discarded[CmpNetStages-1:0];
+      discarded                = discarded + (CmpNetStages+1)'(!cmp_chunk_be[i]);
     end
+    // Selected bytes of the word = destination bytes produced by this source word
+    cmp_chunk_bytes = vlen_t'(VRFWordBWidth) - vlen_t'(discarded);
     for (int k = 0; k < CmpNetStages; k++)
       for (int p = 0; p < VRFWordBWidth; p++) begin
         // The byte already at p stays there
@@ -658,7 +640,7 @@ module spatz_vsldu
   // with the partial destination word kept in shift_overflow_q)
   // wbe != '1 only in flush state --> we don't write the full word
   assign cmp_wbe = (cmp_state_q == CMP_FLUSH) ?
-                   (vrf_be_t'(1) << cmp_total_byte_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
+                   (vrf_be_t'(1) << cmp_base_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
 
   assign cmp_req_valid = ((cmp_state_q == CMP_RUN) && vrf_rvalid_i && cmp_emit_word) ||
                          (cmp_state_q == CMP_FLUSH);
@@ -822,12 +804,12 @@ module spatz_vsldu
     sld_raddr       = (vreg_operation_first_q == VREG_READ_V0_t_lo) ? '0 : (vreg_operation_first_q == VREG_READ_V0_t_hi) ? vrf_addr_t'(1) : base_raddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)] + sld_offset_rd;
     sld_req.waddr   = base_waddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)];
 
-    cmp_waddr     = base_waddr + vrf_addr_t'(((cmp_state_q == CMP_FLUSH) ? cmp_total_byte_q : cmp_start_byte) >> $clog2(VRFWordBWidth));
+    cmp_waddr     = base_waddr + vrf_addr_t'(cmp_base_q >> $clog2(VRFWordBWidth));
 
     unique case (cmp_state_q)
       CMP_READ_MASK_LO: cmp_raddr = base_vs1_raddr;
       CMP_READ_MASK_HI: cmp_raddr = base_vs1_raddr + vrf_addr_t'(1);
-      default:          cmp_raddr = base_raddr + vrf_addr_t'(cmp_word_q);
+      default:          cmp_raddr = base_raddr + vreg_counter_q[$bits(vlen_t)-1:$clog2(VRFWordBWidth)];
     endcase
   end: addr_gen_proc
 
