@@ -348,8 +348,12 @@ module spatz_vsldu
   //////////////////////
 
   // Only the last source word can be partially filled
-  assign cmp_tail_be = (cmp_last_word && (spatz_req.vl[$clog2(VRFWordBWidth)-1:0] != '0)) ?
-                       (vrf_be_t'(1) << spatz_req.vl[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1) : '1;
+  always_comb begin : cmp_tail_be_proc
+    cmp_tail_be = '1;
+    if (cmp_last_word && (spatz_req.vl[$clog2(VRFWordBWidth)-1:0] != '0))
+      for (int b = 0; b < VRFWordBWidth; b++)
+        cmp_tail_be[b] = $clog2(VRFWordBWidth)-1:0'(b) < spatz_req.vl[$clog2(VRFWordBWidth)-1:0];
+  end
 
   always_comb begin : cmp_last_word_proc
     cmp_last_word_d = cmp_last_word_q;
@@ -623,9 +627,12 @@ module spatz_vsldu
     discarded     = '0;
 
     // select bytes in the chunk: the current word's mask bits are at the LSBs of operand_mask_q
-    for (int b = 0; b < VRFWordBWidth; b++) begin
-      cmp_chunk_be[b] = operand_mask_q[b >> spatz_req.vtype.vsew];
-    end
+    unique case (spatz_req.vtype.vsew)
+      EW_8:    for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b];
+      EW_16:   for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b/2];
+      EW_32:   for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b/4];
+      default: for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b/8];
+    endcase
     cmp_chunk_be &= cmp_tail_be;
     // compact read data
     for (int i = 0; i < VRFWordBWidth; i++) begin
@@ -659,10 +666,11 @@ module spatz_vsldu
   // source word that does not emit
   always_comb begin : cmp_wbe_proc
     cmp_wbe = '1;
-    if (cmp_state_q == CMP_FLUSH)
-      cmp_wbe = (vrf_be_t'(1) << cmp_base_q[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1);
-    else if (cmp_last_word && !cmp_emit_word)
-      cmp_wbe = (vrf_be_t'(1) << cmp_end_byte[$clog2(VRFWordBWidth)-1:0]) - vrf_be_t'(1);
+    for (int b = 0; b < VRFWordBWidth; b++)
+      if (cmp_state_q == CMP_FLUSH)
+        cmp_wbe[b] = $clog2(VRFWordBWidth)'(b) < cmp_base_q[$clog2(VRFWordBWidth)-1:0];
+      else if (cmp_last_word && !cmp_emit_word)
+        cmp_wbe[b] = $clog2(VRFWordBWidth)'(b) < cmp_end_byte[$clog2(VRFWordBWidth)-1:0];
   end : cmp_wbe_proc
 
   assign cmp_req_valid = ((cmp_state_q == CMP_RUN) && vrf_rvalid_i && (cmp_emit_word || cmp_last_word)) ||
@@ -694,6 +702,11 @@ module spatz_vsldu
   logic      sld_req_valid;
   logic      sld_re;
   vrf_addr_t sld_raddr;
+
+  logic [$bits(vlen_t):0] ins_pos;
+  assign ins_pos = (($bits(vlen_t)+1)'(vreg_counter_q[$clog2(VRFWordBWidth)-1:0]) + 
+                    ($bits(vlen_t)+1)'(vreg_counter_delta) -
+                    ($bits(vlen_t)+1)'(4'b0001<<spatz_req.vtype.vsew));
 
   always_comb begin : vsldu_slider_proc
     shift_overflow_d = shift_overflow_q;
@@ -765,9 +778,9 @@ module spatz_vsldu
         // Insert rs1 element at the last position
         if (spatz_req.op_sld.insert && vreg_operation_last) begin
           for (int b = 0; b < VRFWordBWidth; b++)
-            if (b >= (vreg_counter_q[$clog2(VRFWordBWidth)-1:0] + vreg_counter_delta - (4'b0001<<spatz_req.vtype.vsew)))
+            if (($bits(vlen_t)+1)'b >= ins_pos)
               data_out[b*8 +: 8] = data_low[b*8 +: 8];
-          data_out = data_out | (vrf_data_t'(rs1_masked) << 8*(vreg_counter_q[$clog2(VRFWordBWidth)-1:0]+vreg_counter_delta-(4'b0001<<spatz_req.vtype.vsew)));
+          data_out = data_out | (vrf_data_t'(rs1_masked) << {ins_pos, 3'b000});
         end
       end
 
