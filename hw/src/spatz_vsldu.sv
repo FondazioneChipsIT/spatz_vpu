@@ -608,27 +608,8 @@ module spatz_vsldu
       cmp_base_d = cmp_end_byte;
   end : cmp_counters_proc
 
-  // Compaction network: each selected byte moves down by the number of discarded bytes
-  // before it (its shift amount). The move is split in log2(VRFWordBWidth) stages, where
-  // stage k moves a byte down by 2^k if bit k of its shift amount is set. Processing the
-  // bits LSB first keeps the byte order and never makes two selected bytes collide.
-  localparam int unsigned CmpNetStages = $clog2(VRFWordBWidth);
-
-  logic [CmpNetStages:0][VRFWordBWidth-1:0] cmp_net_valid;
-  vrf_data_t [CmpNetStages:0] cmp_net_data;
-  logic [CmpNetStages:0][VRFWordBWidth-1:0][CmpNetStages-1:0] cmp_net_shamt;
-  logic [CmpNetStages:0] discarded_bytes;
-
-  always_comb begin : cmp_chunk_mask_proc
+  always_comb begin : cmp_chunk_be_proc
     cmp_chunk_be = '0;
-    cmp_chunk_bytes = '0;
-    compact_data  = '0;
-    cmp_net_valid = '0;
-    cmp_net_data  = '0;
-    cmp_net_shamt = '0;
-    discarded_bytes = '0;
-
-    // select bytes in the chunk
     unique case (spatz_req.vtype.vsew)
       EW_8:    for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b];
       EW_16:   for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b/2];
@@ -636,34 +617,62 @@ module spatz_vsldu
       default: for (int b = 0; b < VRFWordBWidth; b++) cmp_chunk_be[b] = operand_mask_q[b/8];
     endcase
     cmp_chunk_be &= cmp_tail_be;
+  end : cmp_chunk_be_proc
 
-    // Compact read data
+  // Compaction network: every selected byte moves down by the number of discarded
+  // bytes before it (its shift amount). The move is split in log2(VRFWordBWidth)
+  // stages: stage k moves a byte down by 2^k if bit k of its shift amount is set.
+  // It is a synthesis optimized algorithm for performing the compaction of a word with
+  // variable numember of selected bytes
+  localparam int unsigned CmpNetStages = $clog2(VRFWordBWidth);
+
+  typedef struct packed {
+    logic [CmpNetStages-1:0] shamt; // how far the byte has to move down
+    logic [7:0] data; // the byte value, or zero if the position is empty
+  } cmp_lane_t;
+
+  // [stage][byte position]: stage 0 is the input, stage CmpNetStages the output.
+  // An empty position is all zeros: with a zero shift amount it never moves.
+  cmp_lane_t [CmpNetStages:0][VRFWordBWidth-1:0] cmp_net;
+
+  always_comb begin : cmp_compaction_proc
+    // Discarded bytes seen so far. One bit wider than the shift amounts,
+    // as the whole word can be discarded
+    automatic logic [CmpNetStages:0] discarded;
+    discarded = '0;
+
+    // Input: a selected byte gets the number of discarded bytes before it as shift
+    // amount, a discarded byte becomes an empty position
     for (int i = 0; i < VRFWordBWidth; i++) begin
-      cmp_net_valid[0][i] = cmp_chunk_be[i];
-      cmp_net_data[0][i*8 +: 8] = cmp_chunk_be[i] ? vrf_rdata_i[i*8 +: 8] : 8'h00;
-      cmp_net_shamt[0][i] = discarded_bytes[CmpNetStages-1:0];
-      discarded_bytes = discarded_bytes + (CmpNetStages+1)'(!cmp_chunk_be[i]);
+      cmp_net[0][i] = '0;
+      if (cmp_chunk_be[i]) begin
+        cmp_net[0][i].shamt = discarded[CmpNetStages-1:0];
+        cmp_net[0][i].data  = vrf_rdata_i[i*8 +: 8];
+      end else begin
+        discarded = discarded + 1'b1;
+      end
     end
+
     // Selected bytes of the word = destination bytes produced by this source word
-    cmp_chunk_bytes = vlen_t'(VRFWordBWidth) - vlen_t'(discarded_bytes);
+    cmp_chunk_bytes = vlen_t'(VRFWordBWidth) - vlen_t'(discarded);
+
+    // At the stage k, the only byte that can be moved to position p is the only one that is located
+    // 2^k positions above it, so p+(1<<k), because at this stage bytes move down by 2^k or they remain in place 
     for (int k = 0; k < CmpNetStages; k++)
       for (int p = 0; p < VRFWordBWidth; p++) begin
-        // The byte already at p stays there
-        if (cmp_net_valid[k][p] && !cmp_net_shamt[k][p][k]) begin
-          cmp_net_valid[k+1][p] = 1'b1;
-          cmp_net_data[k+1][p*8 +: 8] = cmp_net_data[k][p*8 +: 8];
-          cmp_net_shamt[k+1][p] = cmp_net_shamt[k][p];
-        end
-        // The byte at p + 2^k moves down to p
-        if (p + (1 << k) < VRFWordBWidth)
-          if (cmp_net_valid[k][p + (1 << k)] && cmp_net_shamt[k][p + (1 << k)][k]) begin
-            cmp_net_valid[k+1][p] = 1'b1;
-            cmp_net_data[k+1][p*8 +: 8] = cmp_net_data[k][(p + (1 << k))*8 +: 8];
-            cmp_net_shamt[k+1][p] = cmp_net_shamt[k][p + (1 << k)];
-          end
+        // if the byte 2^k position above exists in the word and its related shamt is 1
+        // it moves down to this position, otherwise the byte here stays or the position is empty
+        if ((p + (1 << k) < VRFWordBWidth) && cmp_net[k][p + (1 << k)].shamt[k])
+          cmp_net[k+1][p] = cmp_net[k][p + (1 << k)]; // the byte 2^k above is moved down
+        else if (!cmp_net[k][p].shamt[k])
+          cmp_net[k+1][p] = cmp_net[k][p]; // the byte doen't move
+        else
+          cmp_net[k+1][p] = '0;
       end
-    compact_data = cmp_net_data[CmpNetStages];
-  end : cmp_chunk_mask_proc
+
+    for (int b = 0; b < VRFWordBWidth; b++)
+      compact_data[b*8 +: 8] = cmp_net[CmpNetStages][b].data;
+  end : cmp_compaction_proc
 
   // Partial destination words (wbe != '1) are written by the flush, or directly by a last
   // source word that does not emit
