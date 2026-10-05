@@ -472,6 +472,7 @@ module spatz_vsldu
     vreg_counter_en        = 1'b0;
     vreg_counter_d         = vreg_counter_q;
     vreg_counter_delta     = '0;
+    vreg_operation_first   = 1'b0;
     vreg_operation_first_d = vreg_operation_first_q;
 
     // Do we have a new request?
