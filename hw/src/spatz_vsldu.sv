@@ -658,7 +658,7 @@ module spatz_vsldu
     cmp_chunk_bytes = vlen_t'(VRFWordBWidth) - vlen_t'(discarded);
 
     // At the stage k, the only byte that can be moved to position p is the only one that is located
-    // 2^k positions above it, so p+(1<<k), because at this stage bytes move down by 2^k or they remain in place 
+    // 2^k positions above it, so p+(1<<k), because at this stage bytes move down by 2^k or they remain in place
     for (int k = 0; k < CmpNetStages; k++)
       for (int p = 0; p < VRFWordBWidth; p++) begin
         // if the byte 2^k position above exists in the word and its related shamt is 1
