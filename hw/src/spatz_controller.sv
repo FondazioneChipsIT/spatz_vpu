@@ -969,7 +969,8 @@ module spatz_controller
           unique case (spatz_req.op_csr.addr)
             riscv_instr::CSR_VSTART: rsp_d.data = elen_t'(vstart_q);
             riscv_instr::CSR_VL    : rsp_d.data = elen_t'(vl_q);
-            riscv_instr::CSR_VTYPE : rsp_d.data = elen_t'(vtype_q);
+            // vill must be held at XLEN-1 for RVV compliance. Snitch is a 32-bit core
+            riscv_instr::CSR_VTYPE : rsp_d.data = elen_t'({vtype_q.vill, 23'b0, vtype_q.vma, vtype_q.vta, vtype_q.vsew, vtype_q.vlmul});
             riscv_instr::CSR_VLENB : rsp_d.data = elen_t'(VLENB);
             riscv_instr::CSR_VXSAT : rsp_d.data = elen_t'(vxsat_q);
             riscv_instr::CSR_VXRM  : rsp_d.data = '0;
