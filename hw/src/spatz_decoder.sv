@@ -2120,6 +2120,7 @@ module spatz_decoder
         riscv_instr::VSETIVLI: begin
           automatic vreg_t setvl_rs1 = decoder_req_i.instr[19:15];
           automatic vreg_t setvl_rd  = decoder_req_i.instr[11:7];
+          automatic logic is_vsetivli = (decoder_req_i.instr[31:30] == 2'b11);
 
           spatz_req.rd      = setvl_rd;
           spatz_req.use_rd  = 1'b1;
@@ -2140,10 +2141,11 @@ module spatz_decoder
             illegal_instr = 1'b1;
           end
 
+          // Note: For vsetivli instruction doesn't follow the rules of vsetvl and vsetvli instructions when rs1=0
           // Set to maxvl or new desired value
-          spatz_req.rs1            = (setvl_rs1 == 0 && setvl_rd != 0) ? '1 : spatz_req.rs1;
+          spatz_req.rs1            = (!is_vsetivli && setvl_rs1 == 0 && setvl_rd != 0) ? '1 : spatz_req.rs1;
           // Keep vl
-          spatz_req.op_cfg.keep_vl = setvl_rs1 == '0 && setvl_rd == '0;
+          spatz_req.op_cfg.keep_vl = !is_vsetivli && setvl_rs1 == '0 && setvl_rd == '0;
         end
 
         default: illegal_instr = 1'b1;
