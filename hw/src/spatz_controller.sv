@@ -178,7 +178,8 @@ module spatz_controller
       // Change vtype and vl if we have a config instruction
       if (spatz_req.op == VCFG) begin
         // Check if vtype is valid
-        if ((spatz_req.vtype.vsew > MAXEW) || (spatz_req.vtype.vlmul inside {LMUL_RES, LMUL_F8}) || (signed'(spatz_req.vtype.vlmul) + signed'($clog2(ELEN)) < signed'(spatz_req.vtype.vsew))) begin
+        // Illegal if SEW > MAXEW or LMUL is reserved or log2(LMUL) + log2(ELEN) < log2(SEW)
+        if ((spatz_req.vtype.vsew > MAXEW) || (spatz_req.vtype.vlmul inside {LMUL_RES}) || (signed'(spatz_req.vtype.vlmul) + signed'($clog2(ELEN)) < signed'(spatz_req.vtype.vsew) + 3)) begin
           // Invalid
           vtype_d = '{vill: 1'b1, vsew: EW_8, vlmul: LMUL_1, default: '0};
           vl_d    = '0;
@@ -194,6 +195,7 @@ module spatz_controller
             unique case (spatz_req.vtype.vlmul)
               LMUL_F2: vlmax >>= 1;
               LMUL_F4: vlmax >>= 2;
+              LMUL_F8: vlmax >>= 3;
               LMUL_1 : vlmax <<= 0;
               LMUL_2 : vlmax <<= 1;
               LMUL_4 : vlmax <<= 2;
