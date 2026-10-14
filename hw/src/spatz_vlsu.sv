@@ -513,6 +513,8 @@ module spatz_vlsu
   for (genvar port = 0; port < NrMemPorts; port++) begin: gen_mem_req_addr
     logic [31:0] addr;
     logic [31:0] stride;
+    logic [31:0] vrf_byte_index;
+    logic [31:0] intra_element_offset;
     logic [31:0] offset;
     logic [31:0] mem_base_addr;
 
@@ -544,15 +546,20 @@ module spatz_vlsu
       stride ='0;
       offset ='0;
 
+      // Calculate the raw byte index in the VRF
+      vrf_byte_index = ({mem_counter_q[port][$bits(vlen_t)-1:MAXEW] << $clog2(NrMemPorts), mem_counter_q[port][int'(MAXEW)-1:0]} + (port << MAXEW));
+      // Extract the intra-element offset
+      intra_element_offset = vrf_byte_index & ((1 << mem_spatz_req.vtype.vsew) - 1);
+
       // consider stride given by the number of segments and base addr expressed for current segment
       if (mem_is_segmented) begin
-        stride = {28'd0, mem_seg_nf};
+        stride = {28'd0, mem_seg_nf} << mem_spatz_req.vtype.vsew;
         mem_base_addr = mem_spatz_req.rs1 + ({29'd0, seg_cnt_q} << mem_spatz_req.vtype.vsew);
       end else if (mem_is_strided) begin
-        stride = mem_spatz_req.rs2 >> mem_spatz_req.vtype.vsew;
+        stride        = $signed(mem_spatz_req.rs2);
         mem_base_addr = mem_spatz_req.rs1;
       end else begin
-        stride = 'd1;
+        stride = 32'd1 << mem_spatz_req.vtype.vsew;
         mem_base_addr = mem_spatz_req.rs1;
       end
 
@@ -564,8 +571,10 @@ module spatz_vlsu
           EW_16: offset   = $signed(vrf_rdata_i[1][8 * word_index +: 16]);
           default: offset = $signed(vrf_rdata_i[1][8 * word_index +: 32]);
         endcase
+        offset += $signed(intra_element_offset);
       end else begin
-        offset = ({mem_counter_q[port][$bits(vlen_t)-1:MAXEW] << $clog2(NrMemPorts), mem_counter_q[port][int'(MAXEW)-1:0]} + (port << MAXEW)) * stride;
+        // Right-shift by vsew to get the element index, then multiply by the byte stride
+        offset = $signed(vrf_byte_index >> mem_spatz_req.vtype.vsew) * $signed(stride) + $signed(intra_element_offset);
       end
 
       addr                      = mem_base_addr + offset;
@@ -686,7 +695,7 @@ module spatz_vlsu
 
   // How large is a single element (in bytes)
   logic [3:0] mem_single_element_size;
-  assign mem_single_element_size = 1'b1 << mem_spatz_req.vtype.vsew;
+  assign mem_single_element_size = mem_is_single_element_operation ? 4'd1 : 1'b1 << mem_spatz_req.vtype.vsew;
 
   // How large is an index element (in bytes)
   logic [3:0] mem_idx_single_element_size;
@@ -706,7 +715,7 @@ module spatz_vlsu
 
   // Size of an element in the VRF
   logic [3:0] commit_single_element_size;
-  assign commit_single_element_size = 1'b1 << commit_insn_q.vsew;
+  assign commit_single_element_size = commit_is_single_element_operation ? 4'd1 : 1'b1 << commit_insn_q.vsew;
 
   ////////////////////
   //  Offset Queue  //
