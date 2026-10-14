@@ -179,7 +179,7 @@ module spatz_controller
       if (spatz_req.op == VCFG) begin
         // Check if vtype is valid
         // Illegal if SEW > MAXEW or LMUL is reserved or log2(LMUL) + log2(ELEN) < log2(SEW)
-        if ((spatz_req.vtype.vsew > MAXEW) || (spatz_req.vtype.vlmul inside {LMUL_RES}) || (signed'(spatz_req.vtype.vlmul) + signed'($clog2(ELEN)) < signed'(spatz_req.vtype.vsew) + 3)) begin
+        if (spatz_req.vtype.vill ||(spatz_req.vtype.vsew > MAXEW) || (spatz_req.vtype.vlmul inside {LMUL_RES}) || (signed'(spatz_req.vtype.vlmul) + signed'($clog2(ELEN)) < signed'(spatz_req.vtype.vsew) + 3)) begin
           // Invalid
           vtype_d = '{vill: 1'b1, vsew: EW_8, vlmul: LMUL_1, default: '0};
           vl_d    = '0;

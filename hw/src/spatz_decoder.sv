@@ -2128,14 +2128,14 @@ module spatz_decoder
           spatz_req.ex_unit = CON;
 
           // Extract vtype
-          if (decoder_req_i.instr[31] == 1'b0) begin
-            spatz_req.vtype = {1'b0, decoder_req_i.instr[27:20]};
+          if (decoder_req_i.instr[31] == 1'b0) begin // vsetvli
+            spatz_req.vtype = {decoder_req_i.instr[30:28] != '0, decoder_req_i.instr[27:20]};
             spatz_req.rs1   = decoder_req_i.rs1;
-          end else if (decoder_req_i.instr[31:30] == 2'b11) begin
-            spatz_req.vtype = {1'b0, decoder_req_i.instr[27:20]};
+          end else if (decoder_req_i.instr[31:30] == 2'b11) begin // vsetivli
+            spatz_req.vtype = {decoder_req_i.instr[29:28] != '0, decoder_req_i.instr[27:20]};
             spatz_req.rs1   = elen_t'(setvl_rs1);
-          end else if (decoder_req_i.instr[31:25] == 7'b1000000) begin
-            spatz_req.vtype = {1'b0, decoder_req_i.rs2[7:0]};
+          end else if (decoder_req_i.instr[31:25] == 7'b1000000) begin // vsetvl
+            spatz_req.vtype = {decoder_req_i.rs2[31:8] != '0, decoder_req_i.rs2[7:0]}; // reserved bits and vill
             spatz_req.rs1   = decoder_req_i.rs1;
           end else begin
             illegal_instr = 1'b1;
