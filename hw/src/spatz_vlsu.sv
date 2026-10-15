@@ -567,11 +567,11 @@ module spatz_vlsu
         // offset within the currently fetched word
         word_index = idx_gbyte[idx_width(N_FU*ELENB)-1:0];
         unique case (mem_spatz_req.op_mem.ew)
-          EW_8 : offset   = $signed(vrf_rdata_i[1][8 * word_index +: 8]);
-          EW_16: offset   = $signed(vrf_rdata_i[1][8 * word_index +: 16]);
-          default: offset = $signed(vrf_rdata_i[1][8 * word_index +: 32]);
+          EW_8 : offset   = vrf_rdata_i[1][8 * word_index +: 8];
+          EW_16: offset   = vrf_rdata_i[1][8 * word_index +: 16];
+          default: offset = vrf_rdata_i[1][8 * word_index +: 32];
         endcase
-        offset += $signed(intra_element_offset);
+        offset += intra_element_offset;
       end else begin
         // Right-shift by vsew to get the element index, then multiply by the byte stride
         offset = $signed(vrf_byte_index >> mem_spatz_req.vtype.vsew) * $signed(stride) + $signed(intra_element_offset);
