@@ -695,7 +695,7 @@ module spatz_vlsu
 
   // How large is a single element (in bytes)
   logic [3:0] mem_single_element_size;
-  assign mem_single_element_size = mem_is_single_element_operation ? 4'd1 : 1'b1 << mem_spatz_req.vtype.vsew;
+  assign mem_single_element_size = 1'b1 << mem_spatz_req.vtype.vsew;
 
   // How large is an index element (in bytes)
   logic [3:0] mem_idx_single_element_size;
@@ -715,7 +715,7 @@ module spatz_vlsu
 
   // Size of an element in the VRF
   logic [3:0] commit_single_element_size;
-  assign commit_single_element_size = commit_is_single_element_operation ? 4'd1 : 1'b1 << commit_insn_q.vsew;
+  assign commit_single_element_size = 1'b1 << commit_insn_q.vsew;
 
   ////////////////////
   //  Offset Queue  //
