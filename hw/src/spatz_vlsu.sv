@@ -341,6 +341,14 @@ module spatz_vlsu
   // Is there are pending write request to be sent to the memory
   logic write_pending;
 
+  // Flag to detect if a single element crosses the 8-byte (ELENB) memory boundary
+  logic [NrMemPorts-1:0] mem_crosses_boundary;
+  logic [NrMemPorts-1:0][$clog2(ELENB):0] byte_offset;
+
+  // Track the phase of a boundary-crossing transaction (0 = first chunk, 1 = overflow chunk)
+  logic [NrMemPorts-1:0] split_phase_q, split_phase_d;
+  `FF(split_phase_q, split_phase_d, '0)
+
   ///////////////////
   //  VRF request  //
   ///////////////////
@@ -584,6 +592,12 @@ module spatz_vlsu
       addr                      = mem_base_addr + offset;
       mem_req_addr[port]        = (addr >> MAXEW) << MAXEW;
       mem_req_addr_offset[port] = addr[int'(MAXEW)-1:0];
+
+      // Shift the address to the next 8-byte word for the overflow chunk (Phase 1)
+      if (mem_crosses_boundary[port] && split_phase_q[port]) begin
+        mem_req_addr[port] += ELENB;
+      end
+
     end
   end: gen_mem_req_addr
 
@@ -721,6 +735,20 @@ module spatz_vlsu
   logic [3:0] commit_single_element_size;
   assign commit_single_element_size = 1'b1 << commit_insn_q.vsew;
 
+  always_comb begin
+    split_phase_d = split_phase_q;
+    for (int port = 0; port < NrMemPorts; port++) begin
+      // Extract the byte offset within the current 8-byte chunk
+      byte_offset[port] = {1'b0, mem_req_addr_offset[port][$clog2(ELENB)-1:0]};
+      // If offset + element size > 8, it spills into the next chunk
+      mem_crosses_boundary[port] = mem_is_single_element_operation && ((byte_offset[port] + mem_single_element_size) > ELENB);
+      // Toggle the phase only when the memory request for the current phase is accepted
+      if (mem_crosses_boundary[port] && spatz_mem_req_valid[port] && spatz_mem_req_ready[port]) begin
+        split_phase_d[port] = ~split_phase_q[port];
+      end
+    end
+  end
+
   ////////////////////
   //  Offset Queue  //
   ////////////////////
@@ -733,17 +761,17 @@ module spatz_vlsu
       .DATA_WIDTH(int'(MAXEW)       ),
       .DEPTH     (NrOutstandingLoads)
     ) i_offset_queue (
-      .clk_i     (clk_i                                                                ),
-      .rst_ni    (rst_ni                                                               ),
-      .flush_i   (1'b0                                                                 ),
-      .testmode_i(1'b0                                                                 ),
-      .empty_o   (/* Unused */                                                         ),
-      .full_o    (offset_queue_full[port]                                              ),
-      .push_i    (spatz_mem_req_valid[port] && spatz_mem_req_ready[port] && mem_is_load),
-      .data_i    (mem_req_addr_offset[port]                                            ),
-      .data_o    (vreg_addr_offset[port]                                               ),
-      .pop_i     (rob_pop[port] && commit_insn_q.is_load                               ),
-      .usage_o   (/* Unused */                                                         )
+      .clk_i     (clk_i                                                                                        ),
+      .rst_ni    (rst_ni                                                                                       ),
+      .flush_i   (1'b0                                                                                         ),
+      .testmode_i(1'b0                                                                                         ),
+      .empty_o   (/* Unused */                                                                                 ),
+      .full_o    (offset_queue_full[port]                                                                      ),
+      .push_i    (spatz_mem_req_valid[port] && spatz_mem_req_ready[port] && mem_is_load && !split_phase_q[port]),
+      .data_i    (mem_req_addr_offset[port]                                                                    ),
+      .data_o    (vreg_addr_offset[port]                                                                       ),
+      .pop_i     (rob_pop[port] && commit_insn_q.is_load                                                       ),
+      .usage_o   (/* Unused */                                                                                 )
     );
   end: gen_offset_queue
 
@@ -997,7 +1025,14 @@ module spatz_vlsu
           mem_counter_d[port] += MemDataWidthB;
         else if (mem_spatz_req.vstart[$clog2(MemDataWidthB) +: $clog2(NrMemPorts)] == port)
           mem_counter_d[port] += mem_spatz_req.vstart[$clog2(MemDataWidthB)-1:0];
-      mem_counter_delta[port] = !mem_operation_valid[port] ? 'd0 : mem_is_single_element_operation ? mem_single_element_size : mem_operation_last[port] ? (max_elements - mem_counter_q[port]) : MemDataWidthB;
+      
+      // Stall the counter on Phase 0 of a boundary-crossing element
+      if (mem_crosses_boundary[port] && split_phase_q[port] == 1'b0) begin
+        mem_counter_delta[port] = 'd0;
+      end else begin
+        mem_counter_delta[port] = !mem_operation_valid[port] ? 'd0 : mem_is_single_element_operation ? mem_single_element_size : mem_operation_last[port] ? (max_elements - mem_counter_q[port]) : MemDataWidthB;
+      end
+
       mem_counter_en[port]    = spatz_mem_req_ready[port] && spatz_mem_req_valid[port];
       mem_counter_max[port]   = max_elements;
 
@@ -1031,6 +1066,25 @@ module spatz_vlsu
   logic v0_t_read_done;
   `FFLARNC(v0_t_read_done,1'b1,v0_t_is_ready,vlsu_rsp_valid_o,1'b0,clk_i,rst_ni);
   `FF(v0_t_is_ready_q,v0_t_is_ready,'0);
+
+  logic [NrMemPorts-1:0] rsp_is_split;
+  logic [NrMemPorts-1:0] rsp_phase_q, rsp_phase_d;
+  logic [NrMemPorts-1:0][63:0] rsp_buffer_q, rsp_buffer_d;
+  `FF(rsp_phase_q, rsp_phase_d, '0)
+  `FF(rsp_buffer_q, rsp_buffer_d, '0)
+
+  for (genvar port = 0; port < NrMemPorts; port++) begin: gen_split_queue
+    fifo_v3 #(
+      .DATA_WIDTH(1), .DEPTH(NrOutstandingLoads)
+    ) i_split_queue (
+      .clk_i(clk_i), .rst_ni(rst_ni), .flush_i(1'b0), .testmode_i(1'b0),
+      .push_i(spatz_mem_req_valid[port] && spatz_mem_req_ready[port] && mem_is_load && !split_phase_q[port]),
+      .data_i(mem_crosses_boundary[port]),
+      .pop_i(rob_push[port] && (state_q == VLSU_RunningLoad || state_q == VLSU_ReadingV0_t)),
+      .data_o(rsp_is_split[port]),
+      .empty_o(), .full_o(), .usage_o()
+    );
+  end
 
   always_comb begin: p_state
     // Maintain state
@@ -1095,7 +1149,7 @@ module spatz_vlsu
       mem_pending[port] = mem_pending_q[port] != '0;
 
       // New request sent
-      if (mem_is_load && spatz_mem_req_valid[port] && spatz_mem_req_ready[port])
+      if (mem_is_load && spatz_mem_req_valid[port] && spatz_mem_req_ready[port] && !split_phase_q[port])
         mem_pending_d[port]++;
 
       // Response used
@@ -1178,6 +1232,9 @@ module spatz_vlsu
     rob_push  = '0;
     rob_pop   = '0;
     rob_req_id = '0;
+    
+    rsp_phase_d  = rsp_phase_q;
+    rsp_buffer_d = rsp_buffer_q;
 
     mem_req_id     = '0;
     mem_req_data   = '0;
@@ -1289,24 +1346,39 @@ module spatz_vlsu
       end
 
       for (int unsigned port = 0; port < NrMemPorts; port++) begin
-        // Write the load result to the buffer
-        rob_wdata[port] = spatz_mem_rsp_i[port].data;
+        automatic logic mem_rsp_arrived;
+        automatic logic [63:0] phase0_mask;
+
 `ifdef MEMPOOL_SPATZ
-        rob_wid[port]   = spatz_mem_rsp_i[port].id;
-        // Need to consider out-of-order memory response
-        rob_push[port]  = spatz_mem_rsp_valid_i[port] && (state_q == VLSU_RunningLoad || state_q == VLSU_ReadingV0_t) && store_count_q[port] == '0;
-`else
-        rob_push[port]  = spatz_mem_rsp_valid_i[port] && (state_q == VLSU_RunningLoad || state_q == VLSU_ReadingV0_t) && store_count_q[port] == '0;
+        rob_wid[port] = spatz_mem_rsp_i[port].id;
 `endif
+
+        mem_rsp_arrived = spatz_mem_rsp_valid_i[port] && (state_q == VLSU_RunningLoad || state_q == VLSU_ReadingV0_t) && store_count_q[port] == '0;
+
+        if (mem_rsp_arrived) begin
+          if (rsp_is_split[port] && rsp_phase_q[port] == 1'b0) begin
+            // Phase 0: Buffer response, suppress ROB push
+            rsp_buffer_d[port] = spatz_mem_rsp_i[port].data;
+            rsp_phase_d[port]  = 1'b1;
+            rob_push[port]     = 1'b0;
+          end else begin
+            // Phase 1 (or normal un-split response): Push merged result to ROB
+            if (rsp_is_split[port]) begin
+              phase0_mask       = ~((64'h1 << (vreg_addr_offset[port] * 8)) - 1);
+              rob_wdata[port]   = (rsp_buffer_q[port] & phase0_mask) | (spatz_mem_rsp_i[port].data & ~phase0_mask);
+              rsp_phase_d[port] = 1'b0;
+            end else begin
+              rob_wdata[port]   = spatz_mem_rsp_i[port].data;
+            end
+            rob_push[port]      = 1'b1;
+          end
+        end
+
         if (!rob_full[port] && !offset_queue_full[port] && mem_operation_valid[port]) begin
           rob_req_id[port]     = spatz_mem_req_ready[port] & spatz_mem_req_valid[port];
-
-          // If we have an index oepration, we ensure we are not fetching the next index
-          // This is because fetch_next_idx uses mem_idx_counter_q signal and requires a 1 cycle bubble before issuing the next index operation
-          // This could be optimized but index operations are anyways slow and not performance critical
           mem_req_lvalid[port] = (!mem_is_indexed || (vrf_rvalid_i[1] && mem_idx_word_ok[port])) && mem_spatz_req.op_mem.is_load;
           mem_req_id[port]     = rob_id[port];
-          mem_req_last[port]   = mem_operation_last[port];
+          mem_req_last[port]   = mem_operation_last[port] && (!mem_crosses_boundary[port] || split_phase_q[port]);
         end
       end
     // Store operation
@@ -1437,8 +1509,8 @@ module spatz_vlsu
 
           mem_req_svalid[port] = rob_rvalid[port] && (!mem_is_indexed || (vrf_rvalid_i[1] && mem_idx_word_ok[port])) && !mem_spatz_req.op_mem.is_load && (commit_insn_q.vm || v0_t_read_done);
           mem_req_id[port]     = rob_rid[port];
-          mem_req_last[port]   = mem_operation_last[port];
-          rob_pop[port]        = spatz_mem_req_valid[port] && spatz_mem_req_ready[port];
+          mem_req_last[port]   = mem_operation_last[port] && (!mem_crosses_boundary[port] || split_phase_q[port]);
+          rob_pop[port]        = spatz_mem_req_valid[port] && spatz_mem_req_ready[port] && (!mem_crosses_boundary[port] || split_phase_q[port]);
 
           // Create byte enable signal for memory request
           if (mem_is_single_element_operation) begin
@@ -1450,7 +1522,15 @@ module spatz_vlsu
               EW_32: mask   = 15;
               default: mask = '1;
             endcase
-            store_strb[port] = mask << shift;
+
+            if (mem_crosses_boundary[port] && split_phase_q[port]) begin
+              // Phase 1: Apply the upper bits of the mask that spilled over
+              store_strb[port] = mask >> (ELENB - shift);
+            end else begin
+              // Phase 0: Apply the standard shifted mask (truncated to 8 bits)
+              store_strb[port] = mask << shift;
+            end
+
             mem_req_strb[port] = store_strb[port] & vm_strb[port];
           end
           else begin
