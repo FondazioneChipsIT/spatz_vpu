@@ -791,8 +791,9 @@ module spatz_controller
 
         LSU: begin
           // Overwrite vl and vstart in request (preserve vtype with vsew)
-          spatz_req.vl     = vl_q;
-          spatz_req.vstart = vstart_q;
+          spatz_req.vtype.vlmul = vtype_q.vlmul;
+          spatz_req.vl          = vl_q;
+          spatz_req.vstart      = vstart_q;
           // The decoder's load/store branches set `op_vtl.old_vd = ls_vd`
           // unconditionally (the field stays defined regardless of
           // VENTAGLIO), but they comment out the direct `spatz_req.vd = ls_vd`
