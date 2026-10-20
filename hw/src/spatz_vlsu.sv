@@ -358,6 +358,7 @@ module spatz_vlsu
 
     vreg_t vd;
     vew_e vsew;
+    logic [2:0] vlmul;
 
     vlen_t vl;
     vlen_t vstart;
@@ -403,6 +404,7 @@ module spatz_vlsu
       id             : mem_spatz_req.id,
       vd             : mem_spatz_req.vd,
       vsew           : mem_spatz_req.vtype.vsew,
+      vlmul          : mem_spatz_req.vtype.vlmul,
       vl             : mem_spatz_req.vl,
       vstart         : mem_spatz_req.vstart,
       rs1            : mem_spatz_req.rs1[2:0],
@@ -616,8 +618,11 @@ module spatz_vlsu
   // Calculate the register file address
   // for segmented instructions destination register is vd + segment
   always_comb begin : gen_vreg_addr
+    logic [3:0] emul;
+    emul = 4'd1 << commit_insn_q.vlmul[1:0];
+    
     if (commit_is_segmented)
-      vd_vreg_addr = ((commit_insn_q.vd + {2'b00, seg_cnt_q}) << $clog2(NrWordsPerVector)) + $unsigned(vd_elem_id);
+      vd_vreg_addr = ((commit_insn_q.vd + {5'd0, seg_cnt_q} * emul) << $clog2(NrWordsPerVector)) + $unsigned(vd_elem_id);
     else
       vd_vreg_addr = (commit_insn_q.vd << $clog2(NrWordsPerVector)) + $unsigned(vd_elem_id);
 
