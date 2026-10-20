@@ -278,6 +278,11 @@ module spatz_vlsu
   //  Memory request  //
   //////////////////////
 
+  // Signal when a new instruction starts in the memory stage
+  logic mem_insn_start;
+  // Signal when a new instruction starts in the VRF/commit stage
+  logic commit_insn_start;
+
   // Is the memory operation valid and are we at the last one?
   logic [NrMemPorts-1:0] mem_operation_valid, mem_idx_vrf_fetch_pending;
   logic [NrMemPorts-1:0] mem_operation_last;
@@ -291,10 +296,12 @@ module spatz_vlsu
   vlen_t [NrMemPorts-1:0] mem_counter_d;
   vlen_t [NrMemPorts-1:0] mem_counter_q;
   logic  [NrMemPorts-1:0] mem_port_finished_q;
+  vlen_t [NrMemPorts-1:0] active_mem_counter;
 
   vlen_t [NrMemPorts-1:0] mem_idx_counter_delta;
   vlen_t [NrMemPorts-1:0] mem_idx_counter_d;
   vlen_t [NrMemPorts-1:0] mem_idx_counter_q;
+  
 
   for (genvar port = 0; port < NrMemPorts; port++) begin: gen_mem_counters
     delta_counter #(
@@ -327,7 +334,8 @@ module spatz_vlsu
       .overflow_o(/* Unused */               )
     );
 
-    assign mem_port_finished_q[port] = mem_spatz_req_valid && (mem_counter_q[port] == mem_counter_max[port]);
+    assign active_mem_counter[port] = mem_insn_start ? mem_counter_d[port] : mem_counter_q[port];
+    assign mem_port_finished_q[port] = mem_spatz_req_valid && (active_mem_counter[port] == mem_counter_max[port]);
   end: gen_mem_counters
 
   // Did the current instruction finished the memory requests?
@@ -428,10 +436,6 @@ module spatz_vlsu
   logic [3:0] commit_seg_nf;
   assign commit_seg_nf = {1'b0, commit_insn_q.nf} + 4'd1;
 
-  // Signal when a new instruction starts in the memory stage
-  logic mem_insn_start;
-  assign mem_insn_start = mem_spatz_req_valid && !mem_insn_pending_q[mem_spatz_req.id] && !commit_insn_full;
-
   always_comb begin: queue_control
     // Maintain state
     mem_insn_finished_d = mem_insn_finished_q;
@@ -471,6 +475,9 @@ module spatz_vlsu
     end
   end
 
+  // Signal when a new instruction starts in the memory stage
+  assign mem_insn_start = mem_spatz_req_valid && !mem_insn_pending_q[mem_spatz_req.id] && !commit_insn_full;
+
   // For each FU that we have, count how many elements we have already loaded/stored.
   // Multiple counters are necessary for the case where not every single FU will
   // receive the same number of elements to work through.
@@ -480,6 +487,7 @@ module spatz_vlsu
   vlen_t [N_FU-1:0]       commit_counter_delta;
   vlen_t [N_FU-1:0]       commit_counter_d;
   vlen_t [N_FU-1:0]       commit_counter_q;
+  vlen_t [N_FU-1:0]       active_commit_counter;
   logic  [NrMemPorts-1:0] commit_finished_q;
   logic  [NrMemPorts-1:0] commit_finished_d;
 
@@ -499,8 +507,9 @@ module spatz_vlsu
       .overflow_o(/* Unused */            )
     );
 
-    assign commit_finished_q[fu] = commit_insn_valid && (commit_counter_q[fu] == commit_counter_max[fu]);
-    assign commit_finished_d[fu] = commit_insn_valid && ((commit_counter_q[fu] + commit_counter_delta[fu]) == commit_counter_max[fu]);
+    assign active_commit_counter[fu] = commit_insn_start ? commit_counter_d[fu] : commit_counter_q[fu];
+    assign commit_finished_q[fu] = commit_insn_valid && (active_commit_counter[fu] == commit_counter_max[fu]);
+    assign commit_finished_d[fu] = commit_insn_valid && ((active_commit_counter[fu] + commit_counter_delta[fu]) == commit_counter_max[fu]);
   end: gen_vreg_counters
 
   ////////////////////////
@@ -561,7 +570,7 @@ module spatz_vlsu
       offset ='0;
 
       // Calculate the raw byte index in the VRF
-      vrf_byte_index = ({mem_counter_q[port][$bits(vlen_t)-1:MAXEW] << $clog2(NrMemPorts), mem_counter_q[port][int'(MAXEW)-1:0]} + (port << MAXEW));
+      vrf_byte_index = ({active_mem_counter[port][$bits(vlen_t)-1:MAXEW] << $clog2(NrMemPorts), active_mem_counter[port][int'(MAXEW)-1:0]} + (port << MAXEW));
       // Extract the intra-element offset
       intra_element_offset = vrf_byte_index & ((1 << mem_spatz_req.vtype.vsew) - 1);
 
@@ -958,9 +967,8 @@ module spatz_vlsu
   //////////////
   // Counters //
   //////////////
-
+  
   // Signal when a new instruction starts in the VRF/commit stage
-  logic commit_insn_start;
   assign commit_insn_start = commit_insn_valid && !busy_q;
 
   // Do we need to catch up to reach element idx parity? (Because of non-zero vstart)
@@ -968,7 +976,7 @@ module spatz_vlsu
   assign vreg_start_0 = vlen_t'(commit_insn_q.vstart[$clog2(ELENB)-1:0]);
   logic [N_FU-1:0] catchup;
   for (genvar i = 0; i < N_FU; i++) begin: gen_catchup
-    assign catchup[i] = (commit_counter_q[i] < vreg_start_0) & (commit_counter_max[i] != commit_counter_q[i]);
+    assign catchup[i] = (active_commit_counter[i] < vreg_start_0) & (commit_counter_max[i] != active_commit_counter[i]);
   end: gen_catchup
 
   for (genvar fu = 0; fu < N_FU; fu++) begin: gen_vreg_counter_proc
@@ -992,15 +1000,15 @@ module spatz_vlsu
         commit_counter_d[fu] += ELENB;
       else if (commit_insn_q.vstart[idx_width(N_FU*ELENB)-1:$clog2(ELENB)] == fu)
         commit_counter_d[fu] += commit_insn_q.vstart[$clog2(ELENB)-1:0];
-      commit_operation_valid[fu] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore) && commit_insn_valid && !commit_insn_start && (commit_counter_q[fu] != max_elements) && (catchup[fu] || (!catchup[fu] && ~|catchup));
-      commit_operation_last[fu]  = commit_operation_valid[fu] && ((max_elements - commit_counter_q[fu]) <= (commit_is_single_element_operation ? commit_single_element_size : ELENB));
-      commit_counter_delta[fu]   = !commit_operation_valid[fu] ? vlen_t'('d0) : commit_is_single_element_operation ? vlen_t'(commit_single_element_size) : commit_operation_last[fu] ? (max_elements - commit_counter_q[fu]) : vlen_t'(ELENB);
+      commit_operation_valid[fu] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore) && commit_insn_valid && !commit_insn_start && (active_commit_counter[fu] != max_elements) && (catchup[fu] || (!catchup[fu] && ~|catchup));
+      commit_operation_last[fu]  = commit_operation_valid[fu] && ((max_elements - active_commit_counter[fu]) <= (commit_is_single_element_operation ? commit_single_element_size : ELENB));
+      commit_counter_delta[fu]   = !commit_operation_valid[fu] ? vlen_t'('d0) : commit_is_single_element_operation ? vlen_t'(commit_single_element_size) : commit_operation_last[fu] ? (max_elements - active_commit_counter[fu]) : vlen_t'(ELENB);
       commit_counter_en[fu]      = commit_operation_valid[fu] && (commit_insn_q.is_load && vrf_req_valid_d && vrf_req_ready_d) || (!commit_insn_q.is_load && vrf_rvalid_i[0] && vrf_re_o[0] && (!mem_is_indexed || vrf_rvalid_i[1]));
       commit_counter_max[fu]     = max_elements;
     end
   end
 
-  assign vd_elem_id = commit_counter_q[N_FU-1] >> $clog2(ELENB);
+  assign vd_elem_id = active_commit_counter[N_FU-1] >> $clog2(ELENB);
 
   for (genvar port = 0; port < NrMemPorts; port++) begin: gen_mem_counter_proc
     // The total amount of elements we have to work through
@@ -1018,8 +1026,8 @@ module spatz_vlsu
         else if (mem_spatz_req.vl[$clog2(MemDataWidthB) +: $clog2(NrMemPorts)] == port)
           max_elements += mem_spatz_req.vl[$clog2(MemDataWidthB)-1:0];
 
-      mem_operation_valid[port] = mem_spatz_req_valid && !mem_insn_start && (max_elements != mem_counter_q[port]);
-      mem_operation_last[port]  = mem_operation_valid[port] && ((max_elements - mem_counter_q[port]) <= (mem_is_single_element_operation ? mem_single_element_size : MemDataWidthB));
+      mem_operation_valid[port] = mem_spatz_req_valid && !mem_insn_start && (max_elements != active_mem_counter[port]);
+      mem_operation_last[port]  = mem_operation_valid[port] && ((max_elements - active_mem_counter[port]) <= (mem_is_single_element_operation ? mem_single_element_size : MemDataWidthB));
       // reset mem counter for the next segment
       mem_counter_load[port]    = mem_insn_start || seg_completed;
       mem_counter_d[port]       = (mem_spatz_req.vstart >> $clog2(NrMemPorts*MemDataWidthB)) << $clog2(MemDataWidthB);
@@ -1035,7 +1043,7 @@ module spatz_vlsu
       if (mem_crosses_boundary[port] && split_phase_q[port] == 1'b0) begin
         mem_counter_delta[port] = 'd0;
       end else begin
-        mem_counter_delta[port] = !mem_operation_valid[port] ? 'd0 : mem_is_single_element_operation ? mem_single_element_size : mem_operation_last[port] ? (max_elements - mem_counter_q[port]) : MemDataWidthB;
+        mem_counter_delta[port] = !mem_operation_valid[port] ? 'd0 : mem_is_single_element_operation ? mem_single_element_size : mem_operation_last[port] ? (max_elements - active_mem_counter[port]) : MemDataWidthB;
       end
 
       mem_counter_en[port]    = spatz_mem_req_ready[port] && spatz_mem_req_valid[port];
@@ -1194,8 +1202,8 @@ module spatz_vlsu
      commit_counter_sum = '0;
      mem_counter_sum = '0;
     for (int unsigned port = 0; port < NrMemPorts; port++) begin
-      commit_counter_sum += commit_counter_q[port];
-      mem_counter_sum += mem_counter_q[port];
+      commit_counter_sum += active_commit_counter[port];
+      mem_counter_sum += active_mem_counter[port];
     end
     commit_slice_base = (commit_counter_sum >> $clog2(VRFWordBWidth)) << $clog2(VRFWordBWidth);
     mem_slice_base    = (mem_counter_sum    >> $clog2(VRFWordBWidth)) << $clog2(VRFWordBWidth);
@@ -1306,14 +1314,14 @@ module spatz_vlsu
           // Shift data to correct position if we have a strided memory access
           if (!commit_insn_q.is_unit_strided)
             if (MAXEW == EW_32)
-              unique case (commit_counter_q[port][1:0])
+              unique case (active_commit_counter[port][1:0])
                 2'b01: data   = {data[23:0], data[31:24]};
                 2'b10: data   = {data[15:0], data[31:16]};
                 2'b11: data   = {data[7:0], data[31:8]};
                 default: data = data;
               endcase
             else
-              unique case (commit_counter_q[port][2:0])
+              unique case (active_commit_counter[port][2:0])
                 3'b001: data  = {data[55:0], data[63:56]};
                 3'b010: data  = {data[47:0], data[63:48]};
                 3'b011: data  = {data[39:0], data[63:40]};
@@ -1328,7 +1336,7 @@ module spatz_vlsu
           // Create write byte enable mask for register file
           if (commit_counter_en[port])
             if (commit_is_single_element_operation) begin
-              automatic logic [$clog2(ELENB)-1:0] shift = commit_counter_q[port][$clog2(ELENB)-1:0];
+              automatic logic [$clog2(ELENB)-1:0] shift = active_commit_counter[port][$clog2(ELENB)-1:0];
               automatic logic [ELENB-1:0] mask          = '1;
               case (commit_insn_q.vsew)
                 EW_8 : mask   = 1;
@@ -1409,7 +1417,7 @@ module spatz_vlsu
           // Shift data to lsb if we have a strided or indexed memory access
           if (!mem_is_unit_strided)
             if (MAXEW == EW_32)
-              unique case (mem_counter_q[port][1:0])
+              unique case (active_mem_counter[port][1:0])
                 2'b01: begin
                   data          = {data[7:0], data[31:8]};
                   vm_strb[port] = {vm_wbe_store[port][0],   vm_wbe_store[port][3:1]};
@@ -1426,7 +1434,7 @@ module spatz_vlsu
               endcase
             else
               // Shift vm_masking along with data
-              unique case (mem_counter_q[port][2:0])
+              unique case (active_mem_counter[port][2:0])
                 3'b001: begin
                   data = {data[7:0], data[63:8]};
                   vm_strb[port] = {vm_wbe_store[port][0],vm_wbe_store[port][7:1]};
@@ -1519,7 +1527,7 @@ module spatz_vlsu
 
           // Create byte enable signal for memory request
           if (mem_is_single_element_operation) begin
-            automatic logic [$clog2(ELENB)-1:0] shift = (!mem_is_unit_strided) ? mem_req_addr_offset[port] : mem_counter_q[port][$clog2(ELENB)-1:0] + commit_insn_q.rs1[int'(MAXEW)-1:0];
+            automatic logic [$clog2(ELENB)-1:0] shift = (!mem_is_unit_strided) ? mem_req_addr_offset[port] : active_mem_counter[port][$clog2(ELENB)-1:0] + commit_insn_q.rs1[int'(MAXEW)-1:0];
             automatic logic [MemDataWidthB-1:0] mask  = '1;
             case (mem_spatz_req.vtype.vsew)
               EW_8 : mask   = 1;
