@@ -338,6 +338,9 @@ module spatz_vlsu
     assign mem_port_finished_q[port] = mem_spatz_req_valid && (active_mem_counter[port] == mem_counter_max[port]);
   end: gen_mem_counters
 
+  // Did we finish an instruction?
+  logic vlsu_finished_req;
+
   // Did the current instruction finished the memory requests?
   logic [NrParallelInstructions-1:0] mem_insn_finished_q, mem_insn_finished_d;
   `FF(mem_insn_finished_q, mem_insn_finished_d, '0)
@@ -472,6 +475,10 @@ module spatz_vlsu
     if (vlsu_rsp_valid_o) begin
       mem_insn_finished_d[vlsu_rsp_o.id] = 1'b0;
       mem_insn_pending_d[vlsu_rsp_o.id]  = 1'b0;
+    end else if (vlsu_finished_req && !commit_insn_q.is_load && commit_insn_q.vl == '0) begin
+      // Clear pending ID in VLSU without responding to the Controller
+      mem_insn_finished_d[commit_insn_q.id] = 1'b0;
+      mem_insn_pending_d[commit_insn_q.id]  = 1'b0;
     end
   end
 
@@ -574,16 +581,19 @@ module spatz_vlsu
       // Extract the intra-element offset
       intra_element_offset = vrf_byte_index & ((1 << mem_spatz_req.vtype.vsew) - 1);
 
-      // consider stride given by the number of segments and base addr expressed for current segment
-      if (mem_is_segmented) begin
+      // The base address for the current segment is ALWAYS offset by seg_cnt_q * (SEW/8)
+      mem_base_addr = mem_spatz_req.rs1 + ({29'd0, seg_cnt_q} << mem_spatz_req.vtype.vsew);
+
+      // Determine the stride between elements of the SAME field
+      if (mem_is_strided) begin
+        // Strided elements are separated by the stride in rs2
+        stride = $signed(mem_spatz_req.rs2);
+      end else if (mem_is_segmented) begin
+        // Unit-stride segmented elements are separated by the total number of fields
         stride = {28'd0, mem_seg_nf} << mem_spatz_req.vtype.vsew;
-        mem_base_addr = mem_spatz_req.rs1 + ({29'd0, seg_cnt_q} << mem_spatz_req.vtype.vsew);
-      end else if (mem_is_strided) begin
-        stride        = $signed(mem_spatz_req.rs2);
-        mem_base_addr = mem_spatz_req.rs1;
       end else begin
+        // Plain unit-stride
         stride = 32'd1 << mem_spatz_req.vtype.vsew;
-        mem_base_addr = mem_spatz_req.rs1;
       end
 
       if (mem_is_indexed) begin
@@ -648,9 +658,6 @@ module spatz_vlsu
   // Are we busy?
   logic busy_q, busy_d;
   `FF(busy_q, busy_d, 1'b0)
-
-  // Did we finish an instruction?
-  logic vlsu_finished_req;
 
   // Memory requests
   spatz_mem_req_t [NrMemPorts-1:0] spatz_mem_req;
@@ -855,7 +862,7 @@ module spatz_vlsu
 
   // Ack when the vector store finishes, or when the load's coalesced write commits to the VRF
   assign vlsu_rsp_o       = coalesce_q.rsp_valid && coalesce_commit ? coalesce_q.rsp : '{id: commit_insn_q.id, default: '0};
-  assign vlsu_rsp_valid_o = coalesce_q.rsp_valid && coalesce_commit ? vrf_wvalid_i   : vlsu_finished_req && !commit_insn_q.is_load;
+  assign vlsu_rsp_valid_o = coalesce_q.rsp_valid && coalesce_commit ? vrf_wvalid_i : vlsu_finished_req && ( (commit_insn_q.is_load && commit_insn_q.vl == '0) || (!commit_insn_q.is_load && commit_insn_q.vl != '0) );
 
   always_comb begin : coalesce_proc
     coalesce_d       = coalesce_q;
