@@ -253,12 +253,13 @@ module spatz_decoder
               // Controller's LSU dispatch (spatz_controller.sv:601) does
               // `spatz_req.vd = spatz_req.op_vtl.old_vd`, so old_vd must
               // carry the real vd or vd gets clobbered to 0.
-              spatz_req.op_vtl.old_vd  = ls_vd;
-              spatz_req.use_vd         = 1'b1;
-              spatz_req.vd_is_src      = 1'b1;
-              spatz_req.rs1            = decoder_req_i.rs1;
-              spatz_req.vs2            = ls_s2;
-              spatz_req.use_vs2        = 1'b1;
+              spatz_req.op_mem.is_ordered = (ls_mop == 2'b11);
+              spatz_req.op_vtl.old_vd     = ls_vd;
+              spatz_req.use_vd            = 1'b1;
+              spatz_req.vd_is_src         = 1'b1;
+              spatz_req.rs1               = decoder_req_i.rs1;
+              spatz_req.vs2               = ls_s2;
+              spatz_req.use_vs2           = 1'b1;
 
               // This is an indexed operation
               spatz_req.op_mem.ew  = spatz_req.vtype.vsew;

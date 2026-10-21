@@ -380,6 +380,7 @@ module spatz_vlsu
     logic is_unit_strided;
     logic is_strided;
     logic is_indexed;
+    logic is_ordered;
     op_e op;
     logic is_segmented;
     logic [2:0] nf;
@@ -421,6 +422,7 @@ module spatz_vlsu
       rs1            : mem_spatz_req.rs1[2:0],
       vm             : mem_spatz_req.op_mem.vm,
       is_load        : mem_spatz_req.op_mem.is_load,
+      is_ordered     : mem_spatz_req.op_mem.is_ordered,
       is_strided     : mem_is_strided,
       is_indexed     : mem_is_indexed,
       is_unit_strided: mem_is_unit_strided,
@@ -562,9 +564,11 @@ module spatz_vlsu
     assign log2_num_idx_maxew_bytes = log2_num_el_maxew + mem_spatz_req.op_mem.ew;
     assign num_idx_maxew_bytes = 1'b1 << log2_num_idx_maxew_bytes;                     // number of index bytes corresponding to one MAXEW-wide element
 
-    assign idx_gbyte = (vlen_t'(port) << log2_num_idx_maxew_bytes)
-                     + (mem_idx_counter_q[port] & (num_idx_maxew_bytes - 1))
-                     + (((mem_idx_counter_q[port] >> log2_num_idx_maxew_bytes) << log2_num_idx_maxew_bytes) * NrMemPorts);
+    assign idx_gbyte = mem_spatz_req.op_mem.is_ordered ? 
+                       (mem_idx_counter_q[port] & (num_idx_maxew_bytes - 1)) + ((mem_idx_counter_q[port] >> log2_num_idx_maxew_bytes) << log2_num_idx_maxew_bytes) : 
+                       (vlen_t'(port) << log2_num_idx_maxew_bytes)
+                       + (mem_idx_counter_q[port] & (num_idx_maxew_bytes - 1))
+                       + (((mem_idx_counter_q[port] >> log2_num_idx_maxew_bytes) << log2_num_idx_maxew_bytes) * NrMemPorts);
 
     // Needed word of the index vector for this port
     assign mem_idx_word[port]    = vreg_elem_t'(idx_gbyte >> $clog2(N_FU*ELENB));
@@ -577,7 +581,13 @@ module spatz_vlsu
       offset ='0;
 
       // Calculate the raw byte index in the VRF
-      vrf_byte_index = ({active_mem_counter[port][$bits(vlen_t)-1:MAXEW] << $clog2(NrMemPorts), active_mem_counter[port][int'(MAXEW)-1:0]} + (port << MAXEW));
+      if (mem_spatz_req.op_mem.is_ordered) begin
+        // Route all element indices sequentially through Port 0
+        vrf_byte_index = active_mem_counter[port];
+      end else begin
+        // Default Spatz multi-port parallel calculation
+        vrf_byte_index = ({active_mem_counter[port][$bits(vlen_t)-1:MAXEW] << $clog2(NrMemPorts), active_mem_counter[port][int'(MAXEW)-1:0]} + (port << MAXEW));
+      end
       // Extract the intra-element offset
       intra_element_offset = vrf_byte_index & ((1 << mem_spatz_req.vtype.vsew) - 1);
 
@@ -991,14 +1001,27 @@ module spatz_vlsu
     vlen_t max_elements;
 
     always_comb begin
-      // Default value
-      max_elements = (commit_insn_q.vl >> $clog2(N_FU*ELENB)) << $clog2(ELENB);
 
-      // Full transfer
-      if (commit_insn_q.vl[$clog2(ELENB) +: $clog2(N_FU)] > fu)
-        max_elements += ELENB;
-      else if (commit_insn_q.vl[$clog2(N_FU*ELENB)-1:$clog2(ELENB)] == fu)
-        max_elements += commit_insn_q.vl[$clog2(ELENB)-1:0];
+      if (commit_insn_q.is_ordered) begin
+        // Port/FU 0 handles all elements sequentially; other FUs handle 0
+        if (fu == 0) begin
+          max_elements = commit_insn_q.vl;
+          commit_counter_en[fu] = commit_operation_valid[fu] && (commit_insn_q.is_load && vrf_req_valid_d && vrf_req_ready_d) || (!commit_insn_q.is_load && vrf_rvalid_i[0] && vrf_re_o[0] && (!mem_is_indexed || vrf_rvalid_i[1]));
+        end else begin
+          max_elements = '0;
+          commit_counter_en[fu] = 1'b0;
+        end
+      end else begin
+        // Default value
+        max_elements = (commit_insn_q.vl >> $clog2(N_FU*ELENB)) << $clog2(ELENB);
+        commit_counter_en[fu]      = commit_operation_valid[fu] && (commit_insn_q.is_load && vrf_req_valid_d && vrf_req_ready_d) || (!commit_insn_q.is_load && vrf_rvalid_i[0] && vrf_re_o[0] && (!mem_is_indexed || vrf_rvalid_i[1]));
+
+        // Full transfer
+        if (commit_insn_q.vl[$clog2(ELENB) +: $clog2(N_FU)] > fu)
+          max_elements += ELENB;
+        else if (commit_insn_q.vl[$clog2(N_FU*ELENB)-1:$clog2(ELENB)] == fu)
+          max_elements += commit_insn_q.vl[$clog2(ELENB)-1:0];
+      end
 
       // reset commit counter for the next segment
       commit_counter_load[fu] = commit_insn_start || seg_completed;
@@ -1010,28 +1033,41 @@ module spatz_vlsu
       commit_operation_valid[fu] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore) && commit_insn_valid && !commit_insn_start && (active_commit_counter[fu] != max_elements) && (catchup[fu] || (!catchup[fu] && ~|catchup));
       commit_operation_last[fu]  = commit_operation_valid[fu] && ((max_elements - active_commit_counter[fu]) <= (commit_is_single_element_operation ? commit_single_element_size : ELENB));
       commit_counter_delta[fu]   = !commit_operation_valid[fu] ? vlen_t'('d0) : commit_is_single_element_operation ? vlen_t'(commit_single_element_size) : commit_operation_last[fu] ? (max_elements - active_commit_counter[fu]) : vlen_t'(ELENB);
-      commit_counter_en[fu]      = commit_operation_valid[fu] && (commit_insn_q.is_load && vrf_req_valid_d && vrf_req_ready_d) || (!commit_insn_q.is_load && vrf_rvalid_i[0] && vrf_re_o[0] && (!mem_is_indexed || vrf_rvalid_i[1]));
       commit_counter_max[fu]     = max_elements;
     end
   end
 
-  assign vd_elem_id = active_commit_counter[N_FU-1] >> $clog2(ELENB);
+  assign vd_elem_id = commit_insn_q.is_ordered ? (active_commit_counter[0] >> $clog2(N_FU*ELENB)) : (active_commit_counter[N_FU-1] >> $clog2(ELENB));
 
   for (genvar port = 0; port < NrMemPorts; port++) begin: gen_mem_counter_proc
     // The total amount of elements we have to work through
     vlen_t max_elements, max_idx_elements;
 
     always_comb begin
-      // Default value
-      max_elements = (mem_spatz_req.vl >> $clog2(NrMemPorts*MemDataWidthB)) << $clog2(MemDataWidthB);
-
-      if (NrMemPorts == 1)
+      
+      if (mem_spatz_req.op_mem.is_ordered) begin
+        if (port == 0) begin
+          max_elements = mem_spatz_req.vl;
+          mem_counter_en[port] = spatz_mem_req_ready[port] && spatz_mem_req_valid[port];
+        end else begin
+          max_elements = '0;
+          mem_counter_en[port] = 1'b0;
+        end
+      end else if (NrMemPorts == 1) begin
         max_elements = mem_spatz_req.vl;
-      else
-        if (mem_spatz_req.vl[$clog2(MemDataWidthB) +: $clog2(NrMemPorts)] > port)
-          max_elements += MemDataWidthB;
-        else if (mem_spatz_req.vl[$clog2(MemDataWidthB) +: $clog2(NrMemPorts)] == port)
-          max_elements += mem_spatz_req.vl[$clog2(MemDataWidthB)-1:0];
+      end else begin
+        // Default value
+        max_elements = (mem_spatz_req.vl >> $clog2(NrMemPorts*MemDataWidthB)) << $clog2(MemDataWidthB);
+        mem_counter_en[port] = spatz_mem_req_ready[port] && spatz_mem_req_valid[port];
+
+        if (NrMemPorts == 1)
+          max_elements = mem_spatz_req.vl;
+        else
+          if (mem_spatz_req.vl[$clog2(MemDataWidthB) +: $clog2(NrMemPorts)] > port)
+            max_elements += MemDataWidthB;
+          else if (mem_spatz_req.vl[$clog2(MemDataWidthB) +: $clog2(NrMemPorts)] == port)
+            max_elements += mem_spatz_req.vl[$clog2(MemDataWidthB)-1:0];
+      end
 
       mem_operation_valid[port] = mem_spatz_req_valid && !mem_insn_start && (max_elements != active_mem_counter[port]);
       mem_operation_last[port]  = mem_operation_valid[port] && ((max_elements - active_mem_counter[port]) <= (mem_is_single_element_operation ? mem_single_element_size : MemDataWidthB));
@@ -1053,8 +1089,7 @@ module spatz_vlsu
         mem_counter_delta[port] = !mem_operation_valid[port] ? 'd0 : mem_is_single_element_operation ? mem_single_element_size : mem_operation_last[port] ? (max_elements - active_mem_counter[port]) : MemDataWidthB;
       end
 
-      mem_counter_en[port]    = spatz_mem_req_ready[port] && spatz_mem_req_valid[port];
-      mem_counter_max[port]   = max_elements;
+      mem_counter_max[port] = max_elements;
 
       // Index counter
 
@@ -1234,7 +1269,13 @@ module spatz_vlsu
 
   always_comb begin
     for (int port = 0; port < NrMemPorts; port++) begin
-      vm_wbe_store[port] = commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[mem_slice_base + port*ELENB +: ELENB];
+      if (commit_insn_q.is_ordered && port == 0) begin
+        // For ordered operations, extract the mask chunk corresponding to Port 0's current element position
+        vm_wbe_store[port] = commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[((active_mem_counter[0] >> $clog2(ELENB)) << $clog2(ELENB)) +: ELENB];
+      end else begin
+        // Default Spatz parallel mask extraction
+        vm_wbe_store[port] = commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[mem_slice_base + port*ELENB +: ELENB];
+      end
     end
   end
 
@@ -1340,6 +1381,12 @@ module spatz_vlsu
               endcase
           vrf_req_d.wdata[ELEN*port +: ELEN] = data;
 
+          if (commit_insn_q.is_ordered && port == 0) begin
+            vrf_req_d.wdata[ELEN * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) +: ELEN] = data;
+          end else begin
+            vrf_req_d.wdata[ELEN*port +: ELEN] = data;
+          end
+
           // Create write byte enable mask for register file
           if (commit_counter_en[port])
             if (commit_is_single_element_operation) begin
@@ -1352,13 +1399,23 @@ module spatz_vlsu
                 default: mask = '1;
               endcase
 
+              if (commit_insn_q.is_ordered && port == 0) begin
+                load_wbe[ELENB * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) +: ELENB] = (mask << shift);
+              end else begin
+                load_wbe[ELENB*port +: ELENB] = (mask << shift);
+              end
+
               load_wbe[ELENB*port +: ELENB] = (mask << shift);
               vm_wbe = vm_masking[commit_slice_base +: VRFWordBWidth];
               vrf_req_d.wbe = load_wbe & vm_wbe;
             end
             else begin
               for (int unsigned k = 0; k < ELENB; k++) begin
-                load_wbe[ELENB*port+k] = (k < commit_counter_delta[port]);
+                if (commit_insn_q.is_ordered && port == 0) begin
+                  load_wbe[ELENB * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) + k] = (k < commit_counter_delta[port]);
+                end else begin
+                  load_wbe[ELENB*port+k] = (k < commit_counter_delta[port]);
+                end
                 vrf_req_d.wbe = load_wbe & (commit_insn_q.vm ? {VRFWordBWidth{1'b1}} : vm_masking[commit_slice_base +: VRFWordBWidth]);
               end
             end
@@ -1417,6 +1474,24 @@ module spatz_vlsu
 
       for (int unsigned port = 0; port < NrMemPorts; port++) begin
         vm_strb[port] = vm_wbe_store[port];
+
+        // Read element from buffer and execute memory request
+        if (state_q == VLSU_RunningStore && !(|rob_full) && |commit_operation_valid) begin
+          vrf_re_o[0] = 1'b1;
+          
+          if (commit_insn_q.is_ordered && port == 0) begin
+            // Extract the specific 64-bit chunk Port 0 currently needs from the 256-bit word
+            rob_wdata[port] = vrf_rdata_i[0][ELEN * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) +: ELEN];
+          end else begin
+            rob_wdata[port] = vrf_rdata_i[0][ELEN*port +: ELEN];
+          end
+          
+          rob_wid[port]    = rob_id[port];
+          rob_req_id[port] = vrf_rvalid_i[0] && (!mem_is_indexed || vrf_rvalid_i[1]);
+          // Prevent unused ROBs from filling up and causing a deadlock
+          rob_push[port]   = rob_req_id[port] && (!commit_insn_q.is_ordered || port == 0);
+        end
+
         // Read element from buffer and execute memory request
         if (mem_operation_valid[port]) begin
           automatic logic [63:0] data = rob_rdata[port];
@@ -1602,7 +1677,7 @@ module spatz_vlsu
     assign spatz_mem_req[port].data  = mem_req_data[port];
     assign spatz_mem_req[port].strb  = mem_req_strb[port];
     assign spatz_mem_req[port].user  = '0;
-    assign spatz_mem_req_valid[port] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore)&&(mem_req_svalid[port] || mem_req_lvalid[port]);
+    assign spatz_mem_req_valid[port] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore) && (mem_req_svalid[port] || mem_req_lvalid[port]) && (!commit_insn_q.is_ordered || (port == 0));
 `endif
   end
 
