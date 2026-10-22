@@ -173,6 +173,7 @@ module spatz_decoder
               spatz_req.use_vd         = 1'b1;
               spatz_req.rs1            = decoder_req_i.rs1;
               spatz_req.rs2            = decoder_req_i.rs2;
+              spatz_req.nf             = ls_nf;
             end
 
             riscv_instr::VLUXEI8_V,
@@ -194,6 +195,7 @@ module spatz_decoder
               spatz_req.rs1            = decoder_req_i.rs1;
               spatz_req.vs2            = ls_s2;
               spatz_req.use_vs2        = 1'b1;
+              spatz_req.nf             = ls_nf;
 
               // This is an indexed operation
               spatz_req.op_mem.ew  = spatz_req.vtype.vsew;
@@ -237,6 +239,7 @@ module spatz_decoder
               spatz_req.vd_is_src      = 1'b1;
               spatz_req.rs1            = decoder_req_i.rs1;
               spatz_req.rs2            = decoder_req_i.rs2;
+              spatz_req.nf             = ls_nf;
             end
 
             riscv_instr::VSUXEI8_V,
@@ -260,6 +263,7 @@ module spatz_decoder
               spatz_req.rs1               = decoder_req_i.rs1;
               spatz_req.vs2               = ls_s2;
               spatz_req.use_vs2           = 1'b1;
+              spatz_req.nf                = ls_nf;
 
               // This is an indexed operation
               spatz_req.op_mem.ew  = spatz_req.vtype.vsew;
@@ -2149,6 +2153,60 @@ module spatz_decoder
 
         default: illegal_instr = 1'b1;
       endcase // Opcodes
+
+      // Check EMUL / NFIELDS legality for loads and stores
+      //  - EMUL must be within [1/8, 8]
+      //  - for indexed ops, the *index* EMUL must be within [1/8, 8] too
+      //  - EMUL * NFIELDS <= 8
+      //  - vd + NFIELDS * max(1, EMUL) <= 32
+      // Warning: The spec should run for every LSU op, but this is limited to the case where nf != 0
+      if (spatz_req.ex_unit == LSU && (spatz_req.nf != 0) && !illegal_instr) begin
+        automatic bit is_indexed = spatz_req.op inside {VLXE, VSXE};
+        automatic int sew_log2   = int'(decoder_req_i.vtype.vsew);  // SEW from vtype CSR
+        automatic int lmul_log2;
+        automatic int data_emul_log2;
+        automatic int idx_emul_log2;
+        automatic int emul_eighths;   // EMUL expressed in units of 1/8
+        automatic int emul_regs;      // registers per field: max(1, EMUL)
+        automatic int nfields    = int'(spatz_req.nf) + 1;
+        automatic int vd_idx     = int'(decoder_req_i.instr[11:7]);
+
+        // LMUL as log2 (fractional values are negative)
+        unique case (decoder_req_i.vtype.vlmul)
+          LMUL_F8: lmul_log2 = -3;
+          LMUL_F4: lmul_log2 = -2;
+          LMUL_F2: lmul_log2 = -1;
+          LMUL_2:  lmul_log2 =  1;
+          LMUL_4:  lmul_log2 =  2;
+          LMUL_8:  lmul_log2 =  3;
+          default: lmul_log2 =  0;
+        endcase
+
+        if (is_indexed) begin
+          // Data uses SEW/LMUL, so its EMUL is just LMUL.
+          // op_mem.ew holds the *index* EEW.
+          data_emul_log2 = lmul_log2;
+          idx_emul_log2  = lmul_log2 + int'(spatz_req.op_mem.ew) - sew_log2;
+          if (idx_emul_log2 < -3 || idx_emul_log2 > 3) illegal_instr = 1'b1;
+        end else begin
+          // For unit-stride / strided ops the decoder put the instruction's EEW in vtype.vsew
+          data_emul_log2 = lmul_log2 + int'(spatz_req.vtype.vsew) - sew_log2;
+        end
+
+        // EMUL out of the architectural range (also protects the shifts below)
+        if (data_emul_log2 < -3 || data_emul_log2 > 3) illegal_instr = 1'b1;
+
+        if (!illegal_instr) begin
+          emul_eighths = (data_emul_log2 >= 0) ? (8 << data_emul_log2) : (8 >> -data_emul_log2);
+          emul_regs    = (data_emul_log2 >  0) ? (1 << data_emul_log2) : 1;
+
+          // EMUL * NFIELDS <= 8  <=>  eighths * nf <= 64
+          if (emul_eighths * nfields > 64) illegal_instr = 1'b1;
+
+          // Register group must not run past v31
+          if (vd_idx + emul_regs * nfields > 32) illegal_instr = 1'b1;
+        end
+      end
 
       // Add correct reset_vstart value
       spatz_req.op_cfg.reset_vstart = illegal_instr ? 1'b0 : reset_vstart;
