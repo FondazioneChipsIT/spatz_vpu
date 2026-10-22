@@ -160,8 +160,7 @@ module spatz_vlsu
 
   // Do we have a segmented memory access
   logic mem_is_segmented;
-  assign mem_is_segmented = mem_spatz_req_valid &&
-                          ((mem_spatz_req.op == VLSEG) || (mem_spatz_req.op == VSSEG));
+  assign mem_is_segmented = mem_spatz_req_valid && (mem_spatz_req.nf != '0);
 
   // nf=0 --> mem_seg_nf=1 --> regular load/store
   logic [3:0] mem_seg_nf;
@@ -435,7 +434,7 @@ module spatz_vlsu
 
   // Commit side segment signals
   logic commit_is_segmented;
-  assign commit_is_segmented = (commit_insn_q.op == VLSEG) || (commit_insn_q.op == VSSEG);
+  assign commit_is_segmented = (commit_insn_q.nf != '0);
 
   // nf=0 --> commit_seg_nf=1 --> regular load/store
   logic [3:0] commit_seg_nf;

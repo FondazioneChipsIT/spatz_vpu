@@ -363,12 +363,27 @@ module spatz_controller
   logic [NrParallelInstructions-1:0] wrote_result_narrowing_q, wrote_result_narrowing_d;
   `FF(wrote_result_narrowing_q, wrote_result_narrowing_d, '0)
 
+  // Does this instruction write registers non-sequentially (segmented)? Consumers must not chain from it.
+  logic [NrParallelInstructions-1:0] seg_writer_q, seg_writer_d;
+  `FF(seg_writer_q, seg_writer_d, '0)
+
   always_comb begin : scoreboard
-    // Maintain stated
+
+    // Local variables for calculating register spans
+    logic [3:0] lmul_val, emul_val;
+    logic [3:0] nf_fields;
+    logic [5:0] vd_span, vs1_span, vs2_span;
+    // EMUL = (EEW / SEW) * LMUL
+    // EEW: from the instruction's width field (carried in the request's vtype.vsew for LSU ops)
+    // SEW: from the current vtype CSR
+    logic [2:0] eew, sew;
+
+    // Maintain state
     read_table_d             = read_table_q;
     write_table_d            = write_table_q;
     scoreboard_d             = scoreboard_q;
     narrow_wide_d            = narrow_wide_q;
+    seg_writer_d             = seg_writer_q;
     wrote_result_narrowing_d = wrote_result_narrowing_q;
 `ifdef VENTAGLIO
     vtl_table_d              = vtl_table_q;
@@ -376,6 +391,43 @@ module spatz_controller
     sb_vtl_redirect_write_o   = '0;
 `endif
 
+    // Decode LMUL
+    unique case (spatz_req.vtype.vlmul)
+      3'b001:  lmul_val = 4'd2;
+      3'b010:  lmul_val = 4'd4;
+      3'b011:  lmul_val = 4'd8;
+      default: lmul_val = 4'd1; // m1 and fractional LMUL
+    endcase
+
+    nf_fields = {3'd0, spatz_req.nf} + 4'd1;
+    eew = spatz_req.vtype.vsew;
+    sew = vtype_q.vsew;
+
+    // Data EMUL: EEW = vtype.vsew (instruction), SEW = vtype_q.vsew (CSR)
+    if (spatz_req.ex_unit == LSU) begin
+      if (eew > sew)       emul_val = lmul_val << (eew - sew);
+      else if (eew < sew)  emul_val = (lmul_val >> (sew - eew)) == 0 ? 4'd1 : (lmul_val >> (sew - eew));
+      else                 emul_val = lmul_val;
+      vd_span = emul_val * nf_fields;    // nf_fields = 1 when nf is 0
+    end
+
+    // Calculate register spans for vs1 and vs2
+    vs1_span = lmul_val;
+    if (spatz_req.op inside {VLXE, VSXE}) begin
+      // Index EEW is stored in op_mem.ew. Scale LMUL proportionally.
+      if (spatz_req.op_mem.ew > sew) begin
+        vs2_span = lmul_val << (spatz_req.op_mem.ew - sew);
+      end else if (spatz_req.op_mem.ew < sew) begin
+        vs2_span = lmul_val >> (sew - spatz_req.op_mem.ew);
+        if (vs2_span == 0) vs2_span = 1;
+      end else begin
+        vs2_span = lmul_val;
+      end
+    end else begin
+      vs2_span = (spatz_req.op_arith.is_narrowing)                                 ? (lmul_val << 1) :
+                 (spatz_req.op_arith.widen_vs1 && !spatz_req.op_arith.widen_vs2)   ? (lmul_val << 1) :
+                                                                                      lmul_val;
+    end
 
     // Nobody wrote to the VRF yet
     wrote_result_d = '0;
@@ -404,7 +456,7 @@ module spatz_controller
       end
 
       // Enable the VRF port if the dependant instructions wrote in the previous cycle
-      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | wrote_result_q[intID]) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
+      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | (wrote_result_q[intID] & ~seg_writer_q)) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
 `else
       // Enable the VRF port if the dependant instructions wrote in the previous cycle
       // sb_enable_o[port] - scoreboard check if you can use this vrf port
@@ -412,7 +464,7 @@ module spatz_controller
       // sb_id_i[port] - the instruction ID that is using this port
       // &(~scoreboard_q[sb_id_i[port]].deps | wrote_result_q) - we either do not care about the other instructions, or they have wrote to vrf
       //                                                         in words: All dependencies must have written their results in the previous cycle
-      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | wrote_result_q) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
+      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | (wrote_result_q & ~seg_writer_q)) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
 `endif
 
 `ifdef VENTAGLIO
@@ -484,6 +536,7 @@ module spatz_controller
 
       scoreboard_d[vfu_rsp_i.id]             = '0;
       narrow_wide_d[vfu_rsp_i.id]            = 1'b0;
+      seg_writer_d[vfu_rsp_i.id]             = 1'b0;
       wrote_result_narrowing_d[vfu_rsp_i.id] = 1'b0;
 `ifdef VENTAGLIO
       vtl_table_d[vfu_rsp_i.id]              = '0;
@@ -508,6 +561,7 @@ module spatz_controller
       end
       scoreboard_d[vlsu_rsp_i.id]             = '0;
       narrow_wide_d[vlsu_rsp_i.id]            = 1'b0;
+      seg_writer_d[vlsu_rsp_i.id]             = 1'b0;
       wrote_result_narrowing_d[vlsu_rsp_i.id] = 1'b0;
 `ifdef VENTAGLIO
       vtl_table_d[vlsu_rsp_i.id]              = '0;
@@ -533,6 +587,7 @@ module spatz_controller
 
       scoreboard_d[vsldu_rsp_i.id]             = '0;
       narrow_wide_d[vsldu_rsp_i.id]            = 1'b0;
+      seg_writer_d[vsldu_rsp_i.id]             = 1'b0;
       wrote_result_narrowing_d[vsldu_rsp_i.id] = 1'b0;
 `ifdef VENTAGLIO
       vtl_table_d[vsldu_rsp_i.id]              = '0;
@@ -614,16 +669,25 @@ module spatz_controller
 
       // RAW hazard
       if (spatz_req.use_vs2) begin
-        scoreboard_d[spatz_req.id].deps[write_table_d[spatz_req.vs2].id] |= write_table_d[spatz_req.vs2].valid;
-        read_table_d[spatz_req.vs2] = {spatz_req.id, 1'b1};
+        for (int unsigned r = 0; r < vs2_span; r++) begin
+          automatic logic [4:0] vreg = spatz_req.vs2 + r;
+          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
+          read_table_d[vreg] = {spatz_req.id, 1'b1};
+        end
       end
       if (spatz_req.use_vs1) begin
-        scoreboard_d[spatz_req.id].deps[write_table_d[spatz_req.vs1].id] |= write_table_d[spatz_req.vs1].valid;
-        read_table_d[spatz_req.vs1] = {spatz_req.id, 1'b1};
+        for (int unsigned r = 0; r < vs1_span; r++) begin
+          automatic logic [4:0] vreg = spatz_req.vs1 + r;
+          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
+          read_table_d[vreg] = {spatz_req.id, 1'b1};
+        end
       end
       if (spatz_req.vd_is_src) begin
-        scoreboard_d[spatz_req.id].deps[write_table_d[spatz_req.vd].id] |= write_table_d[spatz_req.vd].valid;
-        read_table_d[spatz_req.vd] = {spatz_req.id, 1'b1};
+        for (int unsigned r = 0; r < vd_span; r++) begin
+          automatic logic [4:0] vreg = spatz_req.vd + r;
+          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
+          read_table_d[vreg] = {spatz_req.id, 1'b1};
+        end
       end
       // tackling v0 RAW hazard
       if (!spatz_req.op_arith.vm) begin
@@ -642,8 +706,12 @@ module spatz_controller
 
       // WAW and WAR hazards
       if (spatz_req.use_vd) begin
-        scoreboard_d[spatz_req.id].deps[write_table_d[spatz_req.vd].id] |= write_table_d[spatz_req.vd].valid;
-        scoreboard_d[spatz_req.id].deps[read_table_d[spatz_req.vd].id] |= read_table_d[spatz_req.vd].valid;
+        for (int unsigned r = 0; r < vd_span; r++) begin
+          automatic logic [4:0] vreg = spatz_req.vd + r;
+          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
+          scoreboard_d[spatz_req.id].deps[read_table_d[vreg].id]  |= read_table_d[vreg].valid;
+          write_table_d[vreg] = {spatz_req.id, 1'b1};
+        end
         if (spatz_req.op inside {VLX}) begin
           scoreboard_d[spatz_req.id].deps = '0;
         end
@@ -653,6 +721,7 @@ module spatz_controller
       // Is this a risky instruction which should not chain?
       if (spatz_req.op inside {VSLIDEUP, VLSE, VLSEG, VLXE, VSSE, VSSEG, VSXE})
         scoreboard_d[spatz_req.id].prevent_chaining = 1'b1;
+        seg_writer_d[spatz_req.id] = spatz_req.ex_unit == LSU && spatz_req.op_mem.is_load && (vd_span > lmul_val);
 
       // Is this a narrowing or widening instruction?
       if (spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2)
