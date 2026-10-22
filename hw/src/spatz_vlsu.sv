@@ -1237,18 +1237,14 @@ module spatz_vlsu
     end
   end
 
-  vlen_t commit_counter_sum,mem_counter_sum;
-  vlen_t commit_slice_base, mem_slice_base;
+  vlen_t [NrMemPorts-1:0] mem_slice_base;
+  vlen_t [NrMemPorts-1:0] commit_slice_base;
 
   always_comb begin
-     commit_counter_sum = '0;
-     mem_counter_sum = '0;
     for (int unsigned port = 0; port < NrMemPorts; port++) begin
-      commit_counter_sum += active_commit_counter[port];
-      mem_counter_sum += active_mem_counter[port];
+      mem_slice_base[port] = (active_mem_counter[port] >> $clog2(ELENB)) * VRFWordBWidth;
+      commit_slice_base[port] = (active_commit_counter[port] >> $clog2(ELENB)) * VRFWordBWidth;
     end
-    commit_slice_base = (commit_counter_sum >> $clog2(VRFWordBWidth)) << $clog2(VRFWordBWidth);
-    mem_slice_base    = (mem_counter_sum    >> $clog2(VRFWordBWidth)) << $clog2(VRFWordBWidth);
   end
 
 
@@ -1269,12 +1265,13 @@ module spatz_vlsu
 
   always_comb begin
     for (int port = 0; port < NrMemPorts; port++) begin
+      // Calculate the start of the 8-byte word this port is currently processing.
       if (commit_insn_q.is_ordered && port == 0) begin
         // For ordered operations, extract the mask chunk corresponding to Port 0's current element position
         vm_wbe_store[port] = commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[((active_mem_counter[0] >> $clog2(ELENB)) << $clog2(ELENB)) +: ELENB];
       end else begin
         // Default Spatz parallel mask extraction
-        vm_wbe_store[port] = commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[mem_slice_base + port*ELENB +: ELENB];
+        vm_wbe_store[port] = commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[mem_slice_base[port] + port*ELENB +: ELENB];
       end
     end
   end
@@ -1406,7 +1403,7 @@ module spatz_vlsu
               end
 
               load_wbe[ELENB*port +: ELENB] = (mask << shift);
-              vm_wbe = vm_masking[commit_slice_base +: VRFWordBWidth];
+              vm_wbe = vm_masking[commit_slice_base[port] +: VRFWordBWidth];
               vrf_req_d.wbe = load_wbe & vm_wbe;
             end
             else begin
@@ -1416,7 +1413,7 @@ module spatz_vlsu
                 end else begin
                   load_wbe[ELENB*port+k] = (k < commit_counter_delta[port]);
                 end
-                vrf_req_d.wbe = load_wbe & (commit_insn_q.vm ? {VRFWordBWidth{1'b1}} : vm_masking[commit_slice_base +: VRFWordBWidth]);
+                vrf_req_d.wbe = load_wbe & (commit_insn_q.vm ? {VRFWordBWidth{1'b1}} : vm_masking[commit_slice_base[port] +: VRFWordBWidth]);
               end
             end
         end
@@ -1632,7 +1629,7 @@ module spatz_vlsu
             for (int unsigned k = 0; k < ELENB; k++) begin
               store_strb[port][k] = k < mem_counter_delta[port];
             end
-            mem_req_strb[port] = store_strb[port] & (commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[mem_slice_base + port*ELENB +: ELENB]);
+            mem_req_strb[port] = store_strb[port] & (commit_insn_q.vm ? {ELENB{1'b1}} : vm_masking[mem_slice_base[port] + port*ELENB +: ELENB]);
           end
         end else begin
           // Clear empty buffer id requests
