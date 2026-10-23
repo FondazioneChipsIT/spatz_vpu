@@ -368,9 +368,9 @@ module spatz_controller
   always_comb begin : scoreboard
 
     // Local variables for calculating register spans
-    logic [3:0] lmul_val, emul_val;
-    logic [3:0] nf_fields;
-    logic [5:0] vd_span, vs1_span, vs2_span;
+    int unsigned lmul_val, emul_val;
+    int unsigned nf_fields;
+    int unsigned vd_span, vs1_span, vs2_span;
     // EMUL = (EEW / SEW) * LMUL
     // EEW: from the instruction's width field (carried in the request's vtype.vsew for LSU ops)
     // SEW: from the current vtype CSR
@@ -401,12 +401,22 @@ module spatz_controller
     eew = spatz_req.vtype.vsew;
     sew = vtype_q.vsew;
 
-    // Data EMUL: EEW = vtype.vsew (instruction), SEW = vtype_q.vsew (CSR)
+    // Default fallback for VFU, SLD, and non-scaling ops to prevent latches
+    vd_span = lmul_val;
+
+    // Default for VFU, SLD, and non-scaling operations.
+    emul_val = lmul_val;
+    vd_span  = lmul_val;
+
     if (spatz_req.ex_unit == LSU) begin
-      if (eew > sew)       emul_val = lmul_val << (eew - sew);
-      else if (eew < sew)  emul_val = (lmul_val >> (sew - eew)) == 0 ? 4'd1 : (lmul_val >> (sew - eew));
-      else                 emul_val = lmul_val;
-      vd_span = emul_val * nf_fields;    // nf_fields = 1 when nf is 0
+      if (spatz_req.op inside {VLX, VLXE, VSXE}) begin
+        emul_val = lmul_val;
+      end else begin
+        if (eew > sew)      emul_val = lmul_val << (eew - sew);
+        else if (eew < sew) emul_val = (lmul_val >> (sew - eew)) == 0 ? 1 : (lmul_val >> (sew - eew));
+        else                emul_val = lmul_val;
+        vd_span = emul_val * nf_fields;
+      end
     end
 
     // Calculate register spans for vs1 and vs2
