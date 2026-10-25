@@ -273,16 +273,16 @@ module spatz_controller
   fall_through_register #(
     .T(spatz_req_t)
   ) i_req_buffer (
-    .clk_i     (clk_i                ),
-    .rst_ni    (rst_ni               ),
-    .clr_i     (1'b0                 ),
-    .testmode_i(1'b0                 ),
-    .ready_o   (req_buffer_ready     ),
-    .valid_o   (req_buffer_valid     ),
-    .data_i    (decoder_rsp.spatz_req),
-    .valid_i   (decoder_rsp_valid    ),
-    .data_o    (buffer_spatz_req     ),
-    .ready_i   (req_buffer_pop       )
+    .clk_i     (clk_i                                  ),
+    .rst_ni    (rst_ni                                 ),
+    .clr_i     (1'b0                                   ),
+    .testmode_i(1'b0                                   ),
+    .ready_o   (req_buffer_ready                       ),
+    .valid_o   (req_buffer_valid                       ),
+    .data_i    (decoder_rsp.spatz_req                  ),
+    .valid_i   (decoder_rsp_valid && !spatz_req_illegal),
+    .data_o    (buffer_spatz_req                       ),
+    .ready_i   (req_buffer_pop                         )
   );
 
   ////////////////
@@ -294,14 +294,16 @@ module spatz_controller
     spatz_id_t id;
     logic valid;
   } [NRVREG-1:0] table_t;
-  table_t read_table_d, read_table_q, write_table_d, write_table_q;
+  table_t write_table_d, write_table_q;
+  logic [NRVREG-1:0][NrParallelInstructions-1:0] read_table_d, read_table_q;
 
-  `FF(read_table_q, read_table_d, '{default: '0})
+  `FF(read_table_q, read_table_d, '0)
   `FF(write_table_q, write_table_d, '{default: '0})
 
   // Port scoreboard. Keeps track of the dependencies of this instruction with other instructions
   typedef struct packed {
     logic [NrParallelInstructions-1:0] deps;
+    logic [NrParallelInstructions-1:0] nochain_deps;
     logic prevent_chaining; // Prevent chaining with some "risky" instructions
   } scoreboard_metadata_t;
 
@@ -367,6 +369,11 @@ module spatz_controller
   logic [NrParallelInstructions-1:0] seg_writer_q, seg_writer_d;
   `FF(seg_writer_q, seg_writer_d, '0)
 
+  // Base vd of every in-flight instruction, to detect consumers that start on a
+  // non-base register of a producer's register group
+  logic [NrParallelInstructions-1:0][4:0] vd_base_q, vd_base_d;
+  `FF(vd_base_q, vd_base_d, '0)
+
   always_comb begin : scoreboard
 
     // Local variables for calculating register spans
@@ -384,6 +391,7 @@ module spatz_controller
     scoreboard_d             = scoreboard_q;
     narrow_wide_d            = narrow_wide_q;
     seg_writer_d             = seg_writer_q;
+    vd_base_d                = vd_base_q;
     wrote_result_narrowing_d = wrote_result_narrowing_q;
 `ifdef VENTAGLIO
     vtl_table_d              = vtl_table_q;
@@ -403,9 +411,6 @@ module spatz_controller
     eew = spatz_req.vtype.vsew;
     sew = vtype_q.vsew;
 
-    // Default fallback for VFU, SLD, and non-scaling ops to prevent latches
-    vd_span = lmul_val;
-
     // Default for VFU, SLD, and non-scaling operations.
     emul_val = lmul_val;
     vd_span  = lmul_val;
@@ -419,10 +424,12 @@ module spatz_controller
         else                emul_val = lmul_val;
         vd_span = emul_val * nf_fields;
       end
+    end else if (spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2) begin
+      vd_span = lmul_val << 1;
     end
 
     // Calculate register spans for vs1 and vs2
-    vs1_span = lmul_val;
+    vs1_span = (!spatz_req.op_arith.widen_vs1 && spatz_req.op_arith.widen_vs2)   ? (lmul_val << 1) : lmul_val;
     if (spatz_req.op inside {VLXE, VSXE}) begin
       // Index EEW is stored in op_mem.ew. Scale LMUL proportionally.
       if (spatz_req.op_mem.ew > sew) begin
@@ -466,7 +473,7 @@ module spatz_controller
       end
 
       // Enable the VRF port if the dependant instructions wrote in the previous cycle
-      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | (wrote_result_q[intID] & ~seg_writer_q)) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
+      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | (wrote_result_q[intID] & ~seg_writer_q & ~scoreboard_q[sb_id_i[port]].nochain_deps)) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
 `else
       // Enable the VRF port if the dependant instructions wrote in the previous cycle
       // sb_enable_o[port] - scoreboard check if you can use this vrf port
@@ -474,7 +481,7 @@ module spatz_controller
       // sb_id_i[port] - the instruction ID that is using this port
       // &(~scoreboard_q[sb_id_i[port]].deps | wrote_result_q) - we either do not care about the other instructions, or they have wrote to vrf
       //                                                         in words: All dependencies must have written their results in the previous cycle
-      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | (wrote_result_q & ~seg_writer_q)) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
+      sb_enable_o[port] = sb_enable_i[port] && &(~scoreboard_q[sb_id_i[port]].deps | (wrote_result_q & ~seg_writer_q & ~scoreboard_q[sb_id_i[port]].nochain_deps)) && (!(|scoreboard_q[sb_id_i[port]].deps) || !scoreboard_q[sb_id_i[port]].prevent_chaining);
 `endif
 
 `ifdef VENTAGLIO
@@ -538,8 +545,7 @@ module spatz_controller
     // if a dependency existed. If so, invalidate it.
     if (vfu_rsp_valid_i) begin
       for (int unsigned vreg = 0; vreg < NRVREG; vreg++) begin
-        if (read_table_q[vreg].id == vfu_rsp_i.id && read_table_q[vreg].valid)
-          read_table_d[vreg] = '0;
+        read_table_d[vreg][vfu_rsp_i.id] = 1'b0;
         if (write_table_q[vreg].id == vfu_rsp_i.id && write_table_q[vreg].valid)
           write_table_d[vreg] = '0;
       end
@@ -564,8 +570,7 @@ module spatz_controller
     end
     if (vlsu_rsp_valid_i) begin
       for (int unsigned vreg = 0; vreg < NRVREG; vreg++) begin
-        if (read_table_q[vreg].id == vlsu_rsp_i.id && read_table_q[vreg].valid)
-          read_table_d[vreg] = '0;
+        read_table_d[vreg][vlsu_rsp_i.id] = 1'b0;
         if (write_table_q[vreg].id == vlsu_rsp_i.id && write_table_q[vreg].valid)
           write_table_d[vreg] = '0;
       end
@@ -589,8 +594,7 @@ module spatz_controller
     end
     if (vsldu_rsp_valid_i) begin
       for (int unsigned vreg = 0; vreg < NRVREG; vreg++) begin
-        if (read_table_q[vreg].id == vsldu_rsp_i.id && read_table_q[vreg].valid)
-          read_table_d[vreg] = '0;
+        read_table_d[vreg][vsldu_rsp_i.id] = 1'b0;
         if (write_table_q[vreg].id == vsldu_rsp_i.id && write_table_q[vreg].valid)
           write_table_d[vreg] = '0;
       end
@@ -616,8 +620,7 @@ module spatz_controller
 `ifdef VENTAGLIO
     if (vtl_rsp_valid_i) begin
       for (int unsigned vreg = 0; vreg < NRVREG; vreg++) begin
-        if (read_table_q[vreg].id == vtl_rsp_i.id && read_table_q[vreg].valid)
-          read_table_d[vreg] = '0;
+        read_table_d[vreg][vtl_rsp_i.id] = 1'b0;
         if (write_table_q[vreg].id == vtl_rsp_i.id && write_table_q[vreg].valid)
           write_table_d[vreg] = '0;
       end
@@ -632,7 +635,7 @@ module spatz_controller
 `endif
 
     // Initialize the scoreboard metadata if we have a new instruction issued.
-    if (spatz_req_valid && spatz_req.ex_unit != CON) begin
+    if (spatz_req_valid && spatz_req.ex_unit != CON && (spatz_req.vl != '0 || spatz_req.op_arith.is_reduction)) begin
 `ifdef VENTAGLIO
       // VTL forward extension
       vtl_table_d[spatz_req.id] = '{use_vtl: 1'b0, write: '0, read: '0}; // init a table entry
@@ -682,27 +685,33 @@ module spatz_controller
         for (int unsigned r = 0; r < vs2_span; r++) begin
           automatic logic [4:0] vreg = spatz_req.vs2 + r;
           scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          read_table_d[vreg] = {spatz_req.id, 1'b1};
+          if (r == 0)
+            scoreboard_d[spatz_req.id].nochain_deps[write_table_d[vreg].id] |= write_table_d[vreg].valid && (vd_base_q[write_table_d[vreg].id] != vreg);
+          read_table_d[vreg][spatz_req.id] = 1'b1;
         end
       end
       if (spatz_req.use_vs1) begin
         for (int unsigned r = 0; r < vs1_span; r++) begin
           automatic logic [4:0] vreg = spatz_req.vs1 + r;
           scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          read_table_d[vreg] = {spatz_req.id, 1'b1};
+          if (r == 0)
+            scoreboard_d[spatz_req.id].nochain_deps[write_table_d[vreg].id] |= write_table_d[vreg].valid && (vd_base_q[write_table_d[vreg].id] != vreg);
+          read_table_d[vreg][spatz_req.id] = 1'b1;
         end
       end
       if (spatz_req.vd_is_src) begin
         for (int unsigned r = 0; r < vd_span; r++) begin
           automatic logic [4:0] vreg = spatz_req.vd + r;
           scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          read_table_d[vreg] = {spatz_req.id, 1'b1};
+          if (r == 0)
+            scoreboard_d[spatz_req.id].nochain_deps[write_table_d[vreg].id] |= write_table_d[vreg].valid && (vd_base_q[write_table_d[vreg].id] != vreg);
+          read_table_d[vreg][spatz_req.id] = 1'b1;
         end
       end
       // tackling v0 RAW hazard
       if (!spatz_req.op_arith.vm) begin
         scoreboard_d[spatz_req.id].deps[write_table_d[0].id] |= write_table_d[0].valid;
-        read_table_d[0] = {spatz_req.id, 1'b1};
+        read_table_d[0][spatz_req.id] = 1'b1;
       end
 
 `ifdef VENTAGLIO
@@ -710,28 +719,29 @@ module spatz_controller
       if (spatz_req.op_vtl.use_vtl) begin
         scoreboard_d[spatz_req.id].deps[write_table_d[spatz_req.op_vtl.idx_vreg].id] |=
             write_table_d[spatz_req.op_vtl.idx_vreg].valid;
-        read_table_d[spatz_req.op_vtl.idx_vreg] = {spatz_req.id, 1'b1};
+        read_table_d[spatz_req.op_vtl.idx_vreg][spatz_req.id] = 1'b1;
       end
 `endif
 
       // WAW and WAR hazards
       if (spatz_req.use_vd) begin
+        vd_base_d[spatz_req.id] = spatz_req.vd; 
         for (int unsigned r = 0; r < vd_span; r++) begin
           automatic logic [4:0] vreg = spatz_req.vd + r;
           scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          scoreboard_d[spatz_req.id].deps[read_table_d[vreg].id]  |= read_table_d[vreg].valid;
+          scoreboard_d[spatz_req.id].deps |= read_table_d[vreg];
           write_table_d[vreg] = {spatz_req.id, 1'b1};
         end
         if (spatz_req.op inside {VLX}) begin
-          scoreboard_d[spatz_req.id].deps = '0;
+          scoreboard_d[spatz_req.id].deps = '0; // VLX ignores WAW/WAR on its destination (Ventaglio handles it)
         end
-        write_table_d[spatz_req.vd] = {spatz_req.id, 1'b1};
       end
 
+      seg_writer_d[spatz_req.id] = spatz_req.ex_unit == LSU && spatz_req.op_mem.is_load && (nf_fields > 1);
+
       // Is this a risky instruction which should not chain?
-      if (spatz_req.op inside {VSLIDEUP, VLSE, VLSEG, VLXE, VSSE, VSSEG, VSXE})
+      if (spatz_req.op inside {VSLIDEUP, VSLIDEDOWN, VLSE, VLSEG, VLXE, VSSE, VSSEG, VSXE})
         scoreboard_d[spatz_req.id].prevent_chaining = 1'b1;
-        seg_writer_d[spatz_req.id] = spatz_req.ex_unit == LSU && spatz_req.op_mem.is_load && (vd_span > lmul_val);
 
       // Is this a narrowing or widening instruction?
       if (spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2)
@@ -1084,7 +1094,18 @@ module spatz_controller
   assign issue_ready_o = req_buffer_ready;
 
   // Send request off to execution units
-  assign spatz_req_o       = spatz_req;
+  always_comb begin : spatz_req_out
+    automatic logic signed [3:0] lmul_log2;
+    automatic logic signed [3:0] emul_log2;
+
+    spatz_req_o = spatz_req;
+    lmul_log2   = $signed({vtype_q.vlmul[2], vtype_q.vlmul});
+
+    if (spatz_req.ex_unit == LSU && !(spatz_req.op inside {VLX, VLXE, VSXE})) begin
+      emul_log2 = lmul_log2 + $signed({1'b0, spatz_req.vtype.vsew}) - $signed({1'b0, vtype_q.vsew});
+      spatz_req_o.vtype.vlmul = emul_log2[2:0];
+    end
+  end
   assign spatz_req_valid_o = spatz_req_valid;
 
 endmodule : spatz_controller
