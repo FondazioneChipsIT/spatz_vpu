@@ -647,7 +647,7 @@ module spatz_vlsu
   // for segmented instructions destination register is vd + segment
   always_comb begin : gen_vreg_addr
     logic [3:0] emul;
-    assign emul = commit_insn_q.vlmul[2] ? 4'd1 : (4'd1 << commit_insn_q.vlmul[1:0]);
+    emul = commit_insn_q.vlmul[2] ? 4'd1 : (4'd1 << commit_insn_q.vlmul[1:0]);
 
     if (commit_is_segmented)
       vd_vreg_addr = ((commit_insn_q.vd + {5'd0, seg_cnt_q} * emul) << $clog2(NrWordsPerVector)) + $unsigned(vd_elem_id);
