@@ -218,7 +218,9 @@ module spatz_fpu_sequencer
         riscv_instr::FNMADD_B,
         riscv_instr::FCVT_B_H,
         riscv_instr::FCVT_H_B: begin
-          if (RVF && (!(issue_req_i.data_op inside {riscv_instr::FDIV_B, riscv_instr::FSQRT_B}) || FDivSqrt)) begin
+          // When instr is FDIV_B or FSQRT_B, use_fd should be set to 1'b0 because otherwise fd is pending in the scoreboard
+          // This because spatz_decoder only decodes H, S, D versions of these instructions
+          if (RVF && !(issue_req_i.data_op inside {riscv_instr::FDIV_B, riscv_instr::FSQRT_B})) begin
             use_fs1 = !(issue_req_i.data_op inside {riscv_instr::FCVT_B_W, riscv_instr::FCVT_B_WU});
             use_fs2 = !(issue_req_i.data_op inside {riscv_instr::FCLASS_B});
             use_fs3 = issue_req_i.data_op inside {riscv_instr::FMADD_B, riscv_instr::FMSUB_B, riscv_instr::FNMSUB_B, riscv_instr::FNMADD_B};
