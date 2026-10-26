@@ -1112,10 +1112,16 @@ module spatz_decoder
               riscv_instr::VFDIV_VV,
               riscv_instr::VFDIV_VF: begin
                 spatz_req.op = VFDIV;
+                // FPnew divider does not support FP8
+                if (decoder_req_i.vtype.vsew == EW_8)
+                  illegal_instr = 1'b1;   // divsqrt without FP8
               end
 
               riscv_instr::VFSQRT_V: begin
+                // FPnew divider does not support FP8
                 spatz_req.op = VFSQRT;
+                if (decoder_req_i.vtype.vsew == EW_8)
+                  illegal_instr = 1'b1;   // divsqrt without FP8
               end
               riscv_instr::VFADD_VV,
               riscv_instr::VFADD_VF: spatz_req.op = VFADD;
