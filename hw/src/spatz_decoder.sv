@@ -158,7 +158,7 @@ module spatz_decoder
                 spatz_req.nf             = ls_nf;
               end
             end
-            
+
             riscv_instr::VL1RE8_V,
             riscv_instr::VL1RE16_V,
             riscv_instr::VL1RE32_V,
