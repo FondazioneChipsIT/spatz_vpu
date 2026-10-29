@@ -2178,52 +2178,52 @@ module spatz_decoder
       //  - EMUL * NFIELDS <= 8
       //  - vd + NFIELDS * max(1, EMUL) <= 32
       // Warning: The spec should run for every LSU op, but this is limited to the case where nf != 0
-      if (spatz_req.ex_unit == LSU && (spatz_req.nf != 0) && !illegal_instr) begin
-        automatic bit is_indexed = spatz_req.op inside {VLXE, VSXE};
-        automatic int sew_log2   = int'(decoder_req_i.vtype.vsew);  // SEW from vtype CSR
-        automatic int lmul_log2;
-        automatic int data_emul_log2;
-        automatic int idx_emul_log2;
-        automatic int emul_eighths;   // EMUL expressed in units of 1/8
-        automatic int emul_regs;      // registers per field: max(1, EMUL)
-        automatic int nfields    = int'(spatz_req.nf) + 1;
-        automatic int vd_idx     = int'(decoder_req_i.instr[11:7]);
+      if (spatz_req.ex_unit == LSU && (spatz_req.nf != 0)) begin
+        automatic bit               is_indexed = spatz_req.op inside {VLXE, VSXE};
+        automatic logic signed [4:0] sew_l     = $signed(5'(decoder_req_i.vtype.vsew)); // SEW from vtype CSR
+        automatic logic signed [4:0] lmul_l;                                            // log2(LMUL)
+        automatic logic signed [4:0] data_emul_l;                                       // log2(data EMUL)
+        automatic logic signed [4:0] idx_emul_l;                                        // log2(index EMUL)
+        automatic logic        [1:0] emul_pos;                                          // max(0, log2(EMUL))
+        automatic logic        [3:0] nfields   = {1'b0, spatz_req.nf} + 4'd1;           // 2..8
+        automatic logic        [6:0] regs_tot;                                          // max(1,EMUL) * NFIELDS
+        automatic logic        [4:0] vd_idx    = decoder_req_i.instr[11:7];
 
-        // LMUL as log2 (fractional values are negative)
+        // LMUL as log2
         unique case (decoder_req_i.vtype.vlmul)
-          LMUL_F8: lmul_log2 = -3;
-          LMUL_F4: lmul_log2 = -2;
-          LMUL_F2: lmul_log2 = -1;
-          LMUL_2:  lmul_log2 =  1;
-          LMUL_4:  lmul_log2 =  2;
-          LMUL_8:  lmul_log2 =  3;
-          default: lmul_log2 =  0;
+          LMUL_F8: lmul_l = -5'sd3;
+          LMUL_F4: lmul_l = -5'sd2;
+          LMUL_F2: lmul_l = -5'sd1;
+          LMUL_2:  lmul_l =  5'sd1;
+          LMUL_4:  lmul_l =  5'sd2;
+          LMUL_8:  lmul_l =  5'sd3;
+          default: lmul_l =  5'sd0;
         endcase
 
         if (is_indexed) begin
-          // Data uses SEW/LMUL, so its EMUL is just LMUL.
-          // op_mem.ew holds the *index* EEW.
-          data_emul_log2 = lmul_log2;
-          idx_emul_log2  = lmul_log2 + int'(spatz_req.op_mem.ew) - sew_log2;
-          if (idx_emul_log2 < -3 || idx_emul_log2 > 3) illegal_instr = 1'b1;
+          data_emul_l = lmul_l;
+          idx_emul_l  = lmul_l + $signed(5'(spatz_req.op_mem.ew)) - sew_l;
+          if (idx_emul_l < -5'sd3 || idx_emul_l > 5'sd3) illegal_instr = 1'b1;
         end else begin
           // For unit-stride / strided ops the decoder put the instruction's EEW in vtype.vsew
-          data_emul_log2 = lmul_log2 + int'(spatz_req.vtype.vsew) - sew_log2;
+          data_emul_l = lmul_l + $signed(5'(spatz_req.vtype.vsew)) - sew_l;
         end
 
-        // EMUL out of the architectural range (also protects the shifts below)
-        if (data_emul_log2 < -3 || data_emul_log2 > 3) illegal_instr = 1'b1;
+        // EMUL out of the architectural range
+        if (data_emul_l < -5'sd3 || data_emul_l > 5'sd3) illegal_instr = 1'b1;
 
-        if (!illegal_instr) begin
-          emul_eighths = (data_emul_log2 >= 0) ? (8 << data_emul_log2) : (8 >> -data_emul_log2);
-          emul_regs    = (data_emul_log2 >  0) ? (1 << data_emul_log2) : 1;
+        // EMUL * NFIELDS <= 8. NFIELDS is in [2,8], so only EMUL >= 2 can violate it:
+        //   EMUL=2: NFIELDS<=4, EMUL=4: NFIELDS<=2, EMUL=8: NFIELDS<=1 (always violated, nf != 0).
+        if ((data_emul_l == 5'sd1 &&  spatz_req.nf[2])       ||
+            (data_emul_l == 5'sd2 && |spatz_req.nf[2:1])     ||
+            (data_emul_l == 5'sd3))
+          illegal_instr = 1'b1;
 
-          // EMUL * NFIELDS <= 8  <=>  eighths * nf <= 64
-          if (emul_eighths * nfields > 64) illegal_instr = 1'b1;
-
-          // Register group must not run past v31
-          if (vd_idx + emul_regs * nfields > 32) illegal_instr = 1'b1;
-        end
+        // Register group must not run past v31. Only relevant while EMUL*NFIELDS <= 8,
+        // otherwise the instruction is already illegal (value below is don't-care then).
+        emul_pos = (data_emul_l > 5'sd0) ? data_emul_l[1:0] : 2'd0;
+        regs_tot = 7'(nfields) << emul_pos;
+        if ((7'(vd_idx) + regs_tot) > 7'd32) illegal_instr = 1'b1;
       end
 
       // Add correct reset_vstart value

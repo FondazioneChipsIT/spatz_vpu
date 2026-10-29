@@ -385,6 +385,10 @@ module spatz_controller
     // SEW: from the current vtype CSR
     logic [2:0] eew, sew;
 
+    logic [NRVREG-1:0]                 span_vs2, span_vs1, span_vd;
+    logic [NrParallelInstructions-1:0] raw_vs2, raw_vs1, raw_vd, war_vd;
+    logic [NrParallelInstructions-1:0] nochain_vs2, nochain_vs1, nochain_vd;
+
     // Maintain state
     read_table_d             = read_table_q;
     write_table_d            = write_table_q;
@@ -680,33 +684,51 @@ module spatz_controller
       end
 `endif
 
+      span_vs1 = '0; span_vs2 = '0; span_vd = '0;
+      raw_vs1  = '0; raw_vs2  = '0; raw_vd  = '0; war_vd = '0;
+      for (int unsigned v = 0; v < NRVREG; v++) begin
+        automatic logic [4:0] off_vs1 = 5'(v) - spatz_req.vs1;  // wraps like vs + r in 5 bits
+        automatic logic [4:0] off_vs2 = 5'(v) - spatz_req.vs2;
+        automatic logic [4:0] off_vd  = 5'(v) - spatz_req.vd;
+        span_vs1[v] = (off_vs1 < vs1_span);
+        span_vs2[v] = (off_vs2 < vs2_span);
+        span_vd[v]  = (off_vd  < vd_span);
+        for (int unsigned i = 0; i < NrParallelInstructions; i++) begin
+          automatic logic wr = write_table_d[v].valid && (write_table_d[v].id == i);
+          raw_vs1[i] |= span_vs1[v] && wr;
+          raw_vs2[i] |= span_vs2[v] && wr;
+          raw_vd[i]  |= span_vd[v]  && wr;   // RAW for vd_is_src, WAW for use_vd
+        end
+        if (span_vd[v]) war_vd |= read_table_d[v];
+      end
+      // A consumer starting on a non-base register of a producer's group must not chain
+      for (int unsigned i = 0; i < NrParallelInstructions; i++) begin
+        nochain_vs1[i] = write_table_d[spatz_req.vs1].valid && (write_table_d[spatz_req.vs1].id == i)
+                         && (vd_base_q[i] != spatz_req.vs1);
+        nochain_vs2[i] = write_table_d[spatz_req.vs2].valid && (write_table_d[spatz_req.vs2].id == i)
+                         && (vd_base_q[i] != spatz_req.vs2);
+        nochain_vd[i]  = write_table_d[spatz_req.vd].valid  && (write_table_d[spatz_req.vd].id  == i)
+                         && (vd_base_q[i] != spatz_req.vd);
+      end
+
       // RAW hazard
       if (spatz_req.use_vs2) begin
-        for (int unsigned r = 0; r < vs2_span; r++) begin
-          automatic logic [4:0] vreg = spatz_req.vs2 + r;
-          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          if (r == 0)
-            scoreboard_d[spatz_req.id].nochain_deps[write_table_d[vreg].id] |= write_table_d[vreg].valid && (vd_base_q[write_table_d[vreg].id] != vreg);
-          read_table_d[vreg][spatz_req.id] = 1'b1;
-        end
+        scoreboard_d[spatz_req.id].deps          |= raw_vs2;
+        scoreboard_d[spatz_req.id].nochain_deps  |= nochain_vs2;
+        for (int unsigned v = 0; v < NRVREG; v++)
+          if (span_vs2[v]) read_table_d[v][spatz_req.id] = 1'b1;
       end
       if (spatz_req.use_vs1) begin
-        for (int unsigned r = 0; r < vs1_span; r++) begin
-          automatic logic [4:0] vreg = spatz_req.vs1 + r;
-          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          if (r == 0)
-            scoreboard_d[spatz_req.id].nochain_deps[write_table_d[vreg].id] |= write_table_d[vreg].valid && (vd_base_q[write_table_d[vreg].id] != vreg);
-          read_table_d[vreg][spatz_req.id] = 1'b1;
-        end
+        scoreboard_d[spatz_req.id].deps          |= raw_vs1;
+        scoreboard_d[spatz_req.id].nochain_deps  |= nochain_vs1;
+        for (int unsigned v = 0; v < NRVREG; v++)
+          if (span_vs1[v]) read_table_d[v][spatz_req.id] = 1'b1;
       end
       if (spatz_req.vd_is_src) begin
-        for (int unsigned r = 0; r < vd_span; r++) begin
-          automatic logic [4:0] vreg = spatz_req.vd + r;
-          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          if (r == 0)
-            scoreboard_d[spatz_req.id].nochain_deps[write_table_d[vreg].id] |= write_table_d[vreg].valid && (vd_base_q[write_table_d[vreg].id] != vreg);
-          read_table_d[vreg][spatz_req.id] = 1'b1;
-        end
+        scoreboard_d[spatz_req.id].deps         |= raw_vd;
+        scoreboard_d[spatz_req.id].nochain_deps |= nochain_vd;
+        for (int unsigned v = 0; v < NRVREG; v++)
+          if (span_vd[v]) read_table_d[v][spatz_req.id] = 1'b1;
       end
       // tackling v0 RAW hazard
       if (!spatz_req.op_arith.vm) begin
@@ -725,13 +747,10 @@ module spatz_controller
 
       // WAW and WAR hazards
       if (spatz_req.use_vd) begin
-        vd_base_d[spatz_req.id] = spatz_req.vd; 
-        for (int unsigned r = 0; r < vd_span; r++) begin
-          automatic logic [4:0] vreg = spatz_req.vd + r;
-          scoreboard_d[spatz_req.id].deps[write_table_d[vreg].id] |= write_table_d[vreg].valid;
-          scoreboard_d[spatz_req.id].deps |= read_table_d[vreg];
-          write_table_d[vreg] = {spatz_req.id, 1'b1};
-        end
+        vd_base_d[spatz_req.id] = spatz_req.vd;
+        scoreboard_d[spatz_req.id].deps |= raw_vd | war_vd;
+        for (int unsigned v = 0; v < NRVREG; v++)
+          if (span_vd[v]) write_table_d[v] = {spatz_req.id, 1'b1};
         if (spatz_req.op inside {VLX}) begin
           scoreboard_d[spatz_req.id].deps = '0; // VLX ignores WAW/WAR on its destination (Ventaglio handles it)
         end
