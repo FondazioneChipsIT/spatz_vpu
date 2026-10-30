@@ -269,20 +269,41 @@ module spatz_controller
   // Buffer state signals
   logic       req_buffer_ready, req_buffer_valid, req_buffer_pop;
 
+  // Illegal flag of the instruction being decoded this cycle
+  logic decoder_rsp_illegal;
+  `ifdef VENTAGLIO
+    assign spatz_req_vtl_illegal = !vtl_en_q && decoder_rsp.spatz_req.op_vtl.use_vtl; // illegal if vtl is disabled but used
+    assign decoder_rsp_illegal   = decoder_rsp_valid && (decoder_rsp.instr_illegal || spatz_req_vtl_illegal);
+  `else
+    assign decoder_rsp_illegal   = decoder_rsp_valid && decoder_rsp.instr_illegal;
+  `endif
+
+  // The illegal flag travels with the buffered request
+  typedef struct packed {
+    spatz_req_t spatz_req;
+    logic       illegal;
+  } req_buffer_t;
+  req_buffer_t buffer_data_in, buffer_data_out;
+  logic        buffer_illegal;
+
+  assign buffer_data_in   = '{spatz_req: decoder_rsp.spatz_req, illegal: decoder_rsp_illegal};
+  assign buffer_spatz_req = buffer_data_out.spatz_req;
+  assign buffer_illegal   = buffer_data_out.illegal;
+
   // One element wide instruction buffer
   fall_through_register #(
     .T(spatz_req_t)
   ) i_req_buffer (
-    .clk_i     (clk_i                                  ),
-    .rst_ni    (rst_ni                                 ),
-    .clr_i     (1'b0                                   ),
-    .testmode_i(1'b0                                   ),
-    .ready_o   (req_buffer_ready                       ),
-    .valid_o   (req_buffer_valid                       ),
-    .data_i    (decoder_rsp.spatz_req                  ),
-    .valid_i   (decoder_rsp_valid && !spatz_req_illegal),
-    .data_o    (buffer_spatz_req                       ),
-    .ready_i   (req_buffer_pop                         )
+    .clk_i     (clk_i                ),
+    .rst_ni    (rst_ni               ),
+    .clr_i     (1'b0                 ),
+    .testmode_i(1'b0                 ),
+    .ready_o   (req_buffer_ready     ),
+    .valid_o   (req_buffer_valid     ),
+    .data_i    (decoder_rsp.spatz_req),
+    .valid_i   (decoder_rsp_valid    ),
+    .data_o    (buffer_spatz_req     ),
+    .ready_i   (req_buffer_pop       )
   );
 
   ////////////////
@@ -860,12 +881,7 @@ module spatz_controller
     // Define new spatz request
     spatz_req             = buffer_spatz_req;
     spatz_req.id          = next_insn_id;
-`ifdef VENTAGLIO
-    spatz_req_vtl_illegal = !vtl_en_q && decoder_rsp.spatz_req.op_vtl.use_vtl; // illegal if vtl is disabled but used
-    spatz_req_illegal     = decoder_rsp_valid ? decoder_rsp.instr_illegal || spatz_req_vtl_illegal : 1'b0;
-`else
-    spatz_req_illegal     = decoder_rsp_valid ? decoder_rsp.instr_illegal : 1'b0;
-`endif
+    spatz_req_illegal     = buffer_illegal;
     spatz_req_valid       = req_buffer_pop && !spatz_req_illegal && (!running_insn_full);
 
     // We have a new instruction and there is no stall.
