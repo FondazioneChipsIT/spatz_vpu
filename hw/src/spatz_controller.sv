@@ -300,9 +300,9 @@ module spatz_controller
     .testmode_i(1'b0                 ),
     .ready_o   (req_buffer_ready     ),
     .valid_o   (req_buffer_valid     ),
-    .data_i    (decoder_rsp.spatz_req),
+    .data_i    (buffer_data_in       ),
     .valid_i   (decoder_rsp_valid    ),
-    .data_o    (buffer_spatz_req     ),
+    .data_o    (buffer_data_out      ),
     .ready_i   (req_buffer_pop       )
   );
 
