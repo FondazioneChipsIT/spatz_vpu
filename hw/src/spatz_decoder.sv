@@ -11,7 +11,7 @@ module spatz_decoder
   import spatz_pkg::*;
   import rvv_pkg::*;
   import fpnew_pkg::roundmode_e;
-  import fpnew_pkg::fmt_mode_t;
+  import snitch_pkg::fmt_mode_t;
   (
     input  logic         clk_i,
     input  logic         rst_ni,

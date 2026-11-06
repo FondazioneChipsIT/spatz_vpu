@@ -63,7 +63,7 @@ module spatz import spatz_pkg::*; import rvv_pkg::*; import fpnew_pkg::*; #(
     input  drsp_t                             fp_lsu_mem_rsp_i,
     // FPU side channel
     input  roundmode_e                        fpu_rnd_mode_i,
-    input  fmt_mode_t                         fpu_fmt_mode_i,
+    input  snitch_pkg::fmt_mode_t             fpu_fmt_mode_i,
     output status_t                           fpu_status_o
   );
 

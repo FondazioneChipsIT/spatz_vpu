@@ -15,7 +15,7 @@ module spatz_controller
   import vtl_pkg::*;
 `endif
   import fpnew_pkg::roundmode_e;
-  import fpnew_pkg::fmt_mode_t;
+  import snitch_pkg::fmt_mode_t;
   #(
     parameter int  unsigned NrVregfilePorts   = 1,
     parameter int  unsigned NrWritePorts      = 1,
