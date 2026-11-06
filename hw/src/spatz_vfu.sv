@@ -187,7 +187,7 @@ module spatz_vfu
 
   // Is this a FPU instruction
   logic is_fpu_insn;
-  assign is_fpu_insn = FPU && spatz_req.op inside {[VFADD:VSDOTP]};
+  assign is_fpu_insn = FPU && spatz_req.op inside {[VFADD:VFNMADD]};
 
   // Is the FPU busy?
   logic is_fpu_busy;
@@ -411,13 +411,13 @@ module spatz_vfu
           end
           EW_32: begin
             fpu_src_fmt      = spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 ? fpnew_pkg::FP64 : fpnew_pkg::FP32;
-            fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 || spatz_req.op == VSDOTP ? fpnew_pkg::FP64          : fpnew_pkg::FP32;
-            fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F} ? fpnew_pkg::INT64                            : fpnew_pkg::INT32;
+            fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2                                    ? fpnew_pkg::FP64 : fpnew_pkg::FP32;
+            fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}                             ? fpnew_pkg::INT64: fpnew_pkg::INT32;
             fpu_vectorial_op = FLEN > 32;
           end
           EW_16: begin
             fpu_src_fmt      = spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 ? fpnew_pkg::FP32 : (spatz_req.fm.src ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16);
-            fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 || spatz_req.op == VSDOTP          ? fpnew_pkg::FP32 : (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16);
+            fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2                                    ? fpnew_pkg::FP32 : (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16);
             fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}                             ? fpnew_pkg::INT32 : fpnew_pkg::INT16;
             fpu_vectorial_op = 1'b1;
           end
@@ -427,9 +427,9 @@ module spatz_vfu
             else if (spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2)
               fpu_src_fmt = spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16;
             else
-              fpu_src_fmt = spatz_req.fm.src ? fpnew_pkg::FP8ALT  : fpnew_pkg::FP8;
-            fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 || spatz_req.op == VSDOTP          ? (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16) : (spatz_req.fm.dst ? fpnew_pkg::FP8ALT : fpnew_pkg::FP8);
-            fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}                             ? fpnew_pkg::INT16 : fpnew_pkg::INT8;
+              fpu_src_fmt = : fpnew_pkg::FP8;
+            fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2          ? (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16) : fpnew_pkg::FP8;
+            fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}   ? fpnew_pkg::INT16 : fpnew_pkg::INT8;
             fpu_vectorial_op = 1'b1;
           end
           default:;
@@ -492,7 +492,6 @@ module spatz_vfu
             fpu_dst_fmt = fpu_src_fmt;
           end
 
-          VSDOTP: fpu_op = fpnew_pkg::SDOTP;
           VFDIV:  fpu_op = fpnew_pkg::DIV;
           VFSQRT: fpu_op = fpnew_pkg::SQRT;
 
@@ -641,7 +640,7 @@ module spatz_vfu
               operand1 = spatz_req.op_arith.is_reduction ? $unsigned(reduction_q[1]) : vrf_rdata_masked[1];
             else begin
               // Replicate scalar operands
-              unique case (spatz_req.op == VSDOTP ? vew_e'(spatz_req.vtype.vsew + 1) : spatz_req.vtype.vsew)
+              unique case (spatz_req.vtype.vsew)
                 EW_8 : operand1   = MAXEW == EW_32 ? {4*N_FU{spatz_req.rs1[7:0]}}  : {8*N_FU{spatz_req.rs1[7:0]}};
                 EW_16: operand1   = MAXEW == EW_32 ? {2*N_FU{spatz_req.rs1[15:0]}} : {4*N_FU{spatz_req.rs1[15:0]}};
                 EW_32: operand1   = MAXEW == EW_32 ? {1*N_FU{spatz_req.rs1[31:0]}} : {2*N_FU{spatz_req.rs1[31:0]}};
@@ -656,7 +655,7 @@ module spatz_vfu
               operand2 = spatz_req.op_arith.is_reduction ? $unsigned(reduction_q[0]) : vrf_rdata_masked[0];
             else
               // Replicate scalar operands
-              unique case (spatz_req.op == VSDOTP ? vew_e'(spatz_req.vtype.vsew + 1) : spatz_req.vtype.vsew)
+              unique case (spatz_req.vtype.vsew)
                 EW_8 : operand2   = MAXEW == EW_32 ? {4*N_FU{spatz_req.rs2[7:0]}}  : {8*N_FU{spatz_req.rs2[7:0]}};
                 EW_16: operand2   = MAXEW == EW_32 ? {2*N_FU{spatz_req.rs2[15:0]}} : {4*N_FU{spatz_req.rs2[15:0]}};
                 EW_32: operand2   = MAXEW == EW_32 ? {1*N_FU{spatz_req.rs2[31:0]}} : {2*N_FU{spatz_req.rs2[31:0]}};
@@ -827,7 +826,7 @@ module spatz_vfu
   assign el_type = (spatz_req.vtype.vsew) == EW_64 ? fpnew_pkg::FP64 :
                    (spatz_req.vtype.vsew) == EW_32 ? fpnew_pkg::FP32 :
                    (spatz_req.vtype.vsew) == EW_16 ? ( spatz_req.fm.src ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16) :
-                   (spatz_req.vtype.vsew) == EW_8  ? ( spatz_req.fm.src ? fpnew_pkg::FP8ALT : fpnew_pkg::FP8) : fpnew_pkg::FP64;
+                   (spatz_req.vtype.vsew) == EW_8  ? fpnew_pkg::FP8 : fpnew_pkg::FP64;
   logic [5:0] FPUlatency, lat_count_d, lat_count_q;
   assign FPUlatency = FPUImplementation.PipeRegs[ADDMUL][el_type];
   `FF(lat_count_q, lat_count_d, '0)
@@ -878,7 +877,6 @@ module spatz_vfu
             fpnew_pkg::FP16:reduction_neutral_value = {1'b0,5'h1f,10'h0};
             fpnew_pkg::FP16ALT:reduction_neutral_value = {1'b0,8'hff,7'h0};
             fpnew_pkg::FP8:reduction_neutral_value = {1'b0,5'h1f,2'h0};
-            fpnew_pkg::FP8ALT:reduction_neutral_value = {1'b0,4'hf,3'h0};
           endcase
          end
          if (spatz_req.rm == fpnew_pkg::RTZ) begin // VFREDMAX_VS
@@ -889,7 +887,6 @@ module spatz_vfu
             fpnew_pkg::FP16:reduction_neutral_value = {1'b1,5'h1f,10'h0};
             fpnew_pkg::FP16ALT:reduction_neutral_value = {1'b1,8'hff,7'h0};
             fpnew_pkg::FP8:reduction_neutral_value = {1'b1,5'h1f,2'h0};
-            fpnew_pkg::FP8ALT:reduction_neutral_value = {1'b1,4'hf,3'h0};
           endcase
          end
         end
@@ -1800,20 +1797,16 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
         EW_8: begin
           for (int el = 0; el < (MAXEW == EW_64 ? 4*N_FPU : 2*N_FPU); el++) begin
             if (spatz_req.op_arith.widen_vs1) begin
-              unique case ({spatz_req.fm.src, spatz_req.fm.dst})
-                2'b00:  wide_operand1[16*el +: 16] = widen_fp8_to_fp16(shift_operand1[8*el +: 8]);
-                2'b01:  wide_operand1[16*el +: 16] = widen_fp8_to_fp16alt(shift_operand1[8*el +: 8]);
-                2'b10:  wide_operand1[16*el +: 16] = widen_fp8alt_to_fp16(shift_operand1[8*el +: 8]);
-                2'b11:  wide_operand1[16*el +: 16] = widen_fp8alt_to_fp16alt(shift_operand1[8*el +: 8]);
+              unique case (spatz_req.fm.dst)
+                1'b0:  wide_operand1[16*el +: 16] = widen_fp8_to_fp16(shift_operand1[8*el +: 8]);
+                1'b1:  wide_operand1[16*el +: 16] = widen_fp8_to_fp16alt(shift_operand1[8*el +: 8]);
               endcase
             end
 
             if (spatz_req.op_arith.widen_vs2) begin
-              unique case ({spatz_req.fm.src, spatz_req.fm.dst})
-                2'b00:  wide_operand2[16*el +: 16] = widen_fp8_to_fp16(shift_operand2[8*el +: 8]);
-                2'b01:  wide_operand2[16*el +: 16] = widen_fp8_to_fp16alt(shift_operand2[8*el +: 8]);
-                2'b10:  wide_operand2[16*el +: 16] = widen_fp8alt_to_fp16(shift_operand2[8*el +: 8]);
-                2'b11:  wide_operand2[16*el +: 16] = widen_fp8alt_to_fp16alt(shift_operand2[8*el +: 8]);
+              unique case (spatz_req.fm.dst)
+                1'b0:  wide_operand2[16*el +: 16] = widen_fp8_to_fp16(shift_operand2[8*el +: 8]);
+                1'b1:  wide_operand2[16*el +: 16] = widen_fp8_to_fp16alt(shift_operand2[8*el +: 8]);
               endcase
             end
           end
@@ -1887,11 +1880,12 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
         .Features                   (FPUFeatures           ),
         .Implementation             (FPUImpl               ),
         .TagType                    (vfu_tag_t             ),
+        .EnableSIMDMask             (1                     ),  
         .StochasticRndImplementation(fpnew_pkg::DEFAULT_RSR)
       ) i_fpu (
         .clk_i         (clk_i                                                  ),
         .rst_ni        (rst_ni                                                 ),
-        .hart_id_i     ({hart_id_i[31-$clog2(N_FPU):0], fpu[$clog2(N_FPU)-1:0]}),
+        .hart_id_i     (/*unused*/                                             ),
         .flush_i       (1'b0                                                   ),
         .busy_o        (fpu_busy_d[fpu]                                        ),
         .operands_i    ({fpu_operand3_q, fpu_operand2_q, fpu_operand1_q}       ),
@@ -1911,7 +1905,8 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
         .out_valid_o   (int_fpu_result_valid                                   ),
         .out_ready_i   (fpu_result_ready                                       ),
         .status_o      (fpu_status_d[fpu]                                      ),
-        .tag_o         (tag                                                    )
+        .tag_o         (tag                                                    ),
+        .early_valid_o (/*unused*/                                             )
       );
 
       if (fpu == 0) begin: gen_fpu_tag
