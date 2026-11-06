@@ -427,7 +427,7 @@ module spatz_vfu
             else if (spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2)
               fpu_src_fmt = spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16;
             else
-              fpu_src_fmt = : fpnew_pkg::FP8;
+              fpu_src_fmt = fpnew_pkg::FP8;
             fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2          ? (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16) : fpnew_pkg::FP8;
             fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}   ? fpnew_pkg::INT16 : fpnew_pkg::INT8;
             fpu_vectorial_op = 1'b1;
@@ -1879,13 +1879,10 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
       fpnew_top #(
         .Features                   (FPUFeatures           ),
         .Implementation             (FPUImpl               ),
-        .TagType                    (vfu_tag_t             ),
-        .EnableSIMDMask             (1                     ),  
-        .StochasticRndImplementation(fpnew_pkg::DEFAULT_RSR)
+        .TagType                    (vfu_tag_t             )
       ) i_fpu (
         .clk_i         (clk_i                                                  ),
         .rst_ni        (rst_ni                                                 ),
-        .hart_id_i     (/*unused*/                                             ),
         .flush_i       (1'b0                                                   ),
         .busy_o        (fpu_busy_d[fpu]                                        ),
         .operands_i    ({fpu_operand3_q, fpu_operand2_q, fpu_operand1_q}       ),
