@@ -836,6 +836,19 @@ module spatz_controller
     end
   end // ex_issue
 
+  // Unit responses waiting to retire, see Retiring
+  vfu_rsp_t   vfu_rsp;
+  logic       vfu_rsp_valid;
+  logic       vfu_rsp_ready;
+  vlsu_rsp_t  vlsu_rsp;
+  logic       vlsu_rsp_valid;
+  logic       vlsu_rsp_ready;
+  logic       vlsu_rsp_buf_ready;
+  vsldu_rsp_t vsldu_rsp;
+  logic       vsldu_rsp_valid;
+  logic       vsldu_rsp_ready;
+  logic       vsldu_rsp_buf_ready;
+
   always_comb begin: proc_next_insn_id
     // Maintain state
     running_insn_d = running_insn_q;
@@ -849,15 +862,15 @@ module spatz_controller
       running_insn_issue_ids_d[next_insn_id] = buffer_issue_id;
     end
 
-    // Finished a instruction
-    if (vfu_rsp_valid_i) begin
-      running_insn_d[vfu_rsp_i.id] = 1'b0;
+    // Finished an instruction: its response has been handed to the core
+    if (vfu_rsp_valid && vfu_rsp_ready) begin
+      running_insn_d[vfu_rsp.id] = 1'b0;
     end
-    if (vlsu_rsp_valid_i) begin
-      running_insn_d[vlsu_rsp_i.id] = 1'b0;
+    if (vlsu_rsp_valid && vlsu_rsp_ready) begin
+      running_insn_d[vlsu_rsp.id] = 1'b0;
     end
-    if (vsldu_rsp_valid_i) begin
-      running_insn_d[vsldu_rsp_i.id] = 1'b0;
+    if (vsldu_rsp_valid && vsldu_rsp_ready) begin
+      running_insn_d[vsldu_rsp.id] = 1'b0;
     end
 `ifdef VENTAGLIO
     if (vtl_rsp_valid_i) begin
@@ -878,12 +891,8 @@ module spatz_controller
       // Accept the new instruction
       issue_rsp_o.accept = 1'b1;
 
-      case (decoder_rsp.spatz_req.ex_unit)
-        CON: begin
-          issue_rsp_o.writeback = spatz_req.use_rd;
-        end // CON
-        default:;
-      endcase // Operation type
+      // Any unit can write rd (vsetvl, vmv.x.s, vcpop.m, ...): the core must wait for it
+      issue_rsp_o.writeback = decoder_rsp.spatz_req.use_rd;
     // The decoding resulted in an illegal instruction
     end else if (decoder_rsp_valid && decoder_rsp.instr_illegal) begin
       // Do not accept it
@@ -896,13 +905,11 @@ module spatz_controller
   // Retiring //
   //////////////
 
-  vfu_rsp_t vfu_rsp;
-  logic     vfu_rsp_valid;
-  logic     vfu_rsp_ready;
-
+  // Every unit response is buffered: the units do not wait for ready, and only one retires per cycle
+  // Not bypassed: the VFU starts a scalar result only once ready is high
   spill_register #(
     .T(vfu_rsp_t),
-    .Bypass(1'b1)
+    .Bypass(1'b0)
   ) i_vfu_scalar_response (
     .clk_i  (clk_i           ),
     .rst_ni (rst_ni          ),
@@ -913,6 +920,41 @@ module spatz_controller
     .valid_o(vfu_rsp_valid   ),
     .ready_i(vfu_rsp_ready   )
   );
+
+  spill_register #(
+    .T(vlsu_rsp_t)
+  ) i_vlsu_response (
+    .clk_i  (clk_i             ),
+    .rst_ni (rst_ni            ),
+    .data_i (vlsu_rsp_i        ),
+    .valid_i(vlsu_rsp_valid_i  ),
+    .ready_o(vlsu_rsp_buf_ready),
+    .data_o (vlsu_rsp          ),
+    .valid_o(vlsu_rsp_valid    ),
+    .ready_i(vlsu_rsp_ready    )
+  );
+
+  spill_register #(
+    .T(vsldu_rsp_t)
+  ) i_vsldu_response (
+    .clk_i  (clk_i              ),
+    .rst_ni (rst_ni             ),
+    .data_i (vsldu_rsp_i        ),
+    .valid_i(vsldu_rsp_valid_i  ),
+    .ready_o(vsldu_rsp_buf_ready),
+    .data_o (vsldu_rsp          ),
+    .valid_o(vsldu_rsp_valid    ),
+    .ready_i(vsldu_rsp_ready    )
+  );
+
+`ifndef SYNTHESIS
+  assert property (@(posedge clk_i) disable iff (!rst_ni) vlsu_rsp_valid_i |-> vlsu_rsp_buf_ready)
+    else $error("spatz_controller: VLSU response dropped");
+  assert property (@(posedge clk_i) disable iff (!rst_ni) vsldu_rsp_valid_i |-> vsldu_rsp_buf_ready)
+    else $error("spatz_controller: VSLDU response dropped");
+  assert property (@(posedge clk_i) disable iff (!rst_ni) vfu_rsp_valid_i |-> vfu_rsp_ready_o)
+    else $error("spatz_controller: VFU response dropped");
+`endif
 
   logic       rsp_valid_d;
   spatz_rsp_t rsp_d;
@@ -937,7 +979,9 @@ module spatz_controller
     rsp_d       = '0;
     rsp_valid_d = '0;
 
-    vfu_rsp_ready = 1'b0;
+    vfu_rsp_ready   = 1'b0;
+    vlsu_rsp_ready  = 1'b0;
+    vsldu_rsp_ready = 1'b0;
 
     if (retire_csr) begin
 `ifdef MEMPOOL_SPATZ
@@ -973,21 +1017,34 @@ module spatz_controller
       rsp_d.id      = running_insn_issue_ids_q[vfu_rsp.id];
       rsp_d.rd      = vfu_rsp.rd;
       rsp_d.data    = vfu_rsp.result;
-      rsp_d.we    = 1'b1;
+      rsp_d.we      = vfu_rsp.wb;
 `ifdef MEMPOOL_SPATZ
       rsp_d.write   = 1'b1;
 `endif
       rsp_valid_d   = 1'b1;
       vfu_rsp_ready = rsp_ready_d;
-    end else if (vlsu_rsp_valid_i && running_insn_q[vlsu_rsp_i.id]) begin
-      rsp_d.id      = running_insn_issue_ids_q[vlsu_rsp_i.id];
+    end else if (vlsu_rsp_valid && running_insn_q[vlsu_rsp.id]) begin
+      rsp_d.id       = running_insn_issue_ids_q[vlsu_rsp.id];
       // TODO: exception not handled
       // TODO: set exception code
-      //rsp_d.exc     = vlsu_rsp_i.exc;
-      rsp_valid_d   = 1'b1;
-    end else if (vsldu_rsp_valid_i && running_insn_q[vsldu_rsp_i.id]) begin
-      rsp_d.id      = running_insn_issue_ids_q[vsldu_rsp_i.id];
-      rsp_valid_d   = 1'b1;
+      //rsp_d.exc     = vlsu_rsp.exc;
+      rsp_valid_d    = 1'b1;
+      vlsu_rsp_ready = rsp_ready_d;
+    end else if (vsldu_rsp_valid && running_insn_q[vsldu_rsp.id]) begin
+      rsp_d.id        = running_insn_issue_ids_q[vsldu_rsp.id];
+      rsp_valid_d     = 1'b1;
+      vsldu_rsp_ready = rsp_ready_d;
+    end
+
+    // A response of an untracked instruction has nobody to retire to
+    if (vfu_rsp_valid && !running_insn_q[vfu_rsp.id]) begin
+      vfu_rsp_ready = 1'b1;
+    end
+    if (vlsu_rsp_valid && !running_insn_q[vlsu_rsp.id]) begin
+      vlsu_rsp_ready = 1'b1;
+    end
+    if (vsldu_rsp_valid && !running_insn_q[vsldu_rsp.id]) begin
+      vsldu_rsp_ready = 1'b1;
     end
   end // retire
 
