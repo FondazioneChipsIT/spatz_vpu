@@ -178,7 +178,7 @@ package spatz_pkg;
     VFADD, VFDIV, VFSQRT, VFSUB, VFMUL,
     VFMINMAX, VFSGNJ, VFMERGE, VFCMP, VFCLASS,
     VF2I, VF2U, VI2F, VU2F, VF2F,
-    VFMADD, VFMSUB, VFNMSUB, VFNMADD, VSDOTP,
+    VFMADD, VFMSUB, VFNMSUB, VFNMADD,
     // Ventaglio indexed fused-multiply ops (vfxmacc.vrf / vfxmul.vrf)
     VFXMADD
   } op_e;
@@ -309,7 +309,7 @@ package spatz_pkg;
     // Rounding mode
     fpnew_pkg::roundmode_e rm;
     // Format mode
-    fpnew_pkg::fmt_mode_t fm;
+    snitch_pkg::fmt_mode_t fm;
 
     // Instruction operation
     op_e op;
@@ -486,8 +486,8 @@ package spatz_pkg;
     Width        : ELEN,
     EnableVectors: 1'b1,
     EnableNanBox : 1'b1,
-    //              FP32  FP64  FP16  FP8   FP16a FP8a
-    FpFmtMask    : {1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1},
+    //              FP32  FP64  FP16  FP8   FP16a
+    FpFmtMask    : {1'b1, 1'b1, 1'b1, 1'b1, 1'b1},
     //              INT8  INT16 INT32 INT64
     IntFmtMask   : {1'b1, 1'b1, 1'b1, 1'b1}
   } :
@@ -496,8 +496,8 @@ package spatz_pkg;
     Width        : ELEN,
     EnableVectors: 1'b1,
     EnableNanBox : 1'b1,
-    //              FP32  FP64  FP16  FP8   FP16a FP8a
-    FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b1, 1'b0, 1'b0},
+    //              FP32  FP64  FP16  FP8   FP16a
+    FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b1, 1'b0},
     //              INT8  INT16 INT32 INT64
     IntFmtMask   : {1'b1, 1'b1, 1'b1, 1'b0}
   };
@@ -506,20 +506,18 @@ package spatz_pkg;
   localparam fpnew_pkg::fpu_implementation_t MemPoolFPUImpl =
   '{
       // Pipeline stages
-      //              FP32 FP64 FP16 FP8 FP16a FP8a
-      PipeRegs: '{'{  1,   2,   1,   1,   0,   0},    // ADDMUL
-                  '{  1,   1,   1,   1,   1,   1},    // DIVSQRT
-                  '{  1,   1,   1,   1,   1,   1},    // NONCOMP
-                  '{  2,   2,   2,   2,   2,   2},    // CONV
-                  '{  2,   2,   2,   2,   2,   2}},   // DOTP
+      //              FP32 FP64 FP16 FP8 FP16a
+      PipeRegs: '{'{  1,   2,   1,   1,   0},    // ADDMUL
+                  '{  1,   1,   1,   1,   1},    // DIVSQRT
+                  '{  1,   1,   1,   1,   1},    // NONCOMP
+                  '{  2,   2,   2,   2,   2}},   // CONV
       // MERGED: share one functional unit for all types
       // PARALLEL: multiple functional units
       // DISABLED: turn off
       UnitTypes:'{'{  default: fpnew_pkg::MERGED},    // ADDMUL
                   '{  default: fpnew_pkg::DISABLED},  // DIVSQRT
                   '{  default: fpnew_pkg::PARALLEL},  // NONCOMP
-                  '{  default: fpnew_pkg::MERGED},    // CONV
-                  '{  default: fpnew_pkg::MERGED}},   // DOTP
+                  '{  default: fpnew_pkg::MERGED}},    // CONV
       PipeConfig: fpnew_pkg::BEFORE
   };
 
@@ -611,7 +609,7 @@ package spatz_pkg;
   function automatic fpnew_pkg::fpu_implementation_t without_divsqrt(
       input fpnew_pkg::fpu_implementation_t base);
     fpnew_pkg::fpu_implementation_t tmp = base;
-    tmp.UnitTypes[1] = '{default: fpnew_pkg::DISABLED};
+    tmp.UnitTypes[fpnew_pkg::DIVSQRT] = '{default: fpnew_pkg::DISABLED};
     return tmp;
   endfunction
 
