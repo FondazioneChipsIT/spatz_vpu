@@ -1003,6 +1003,7 @@ module spatz_controller
     if (decoder_rsp_valid && !decoder_rsp.instr_illegal) begin
       // Accept the new instruction
       issue_rsp_o.accept = 1'b1;
+      issue_rsp_o.loadstore = spatz_req.ex_unit == LSU;
 
       case (decoder_rsp.spatz_req.ex_unit)
         CON: begin
