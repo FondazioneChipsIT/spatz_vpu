@@ -2207,6 +2207,13 @@ module spatz_decoder
       if (spatz_req.ex_unit == LSU && (spatz_req.nf != 0) && emul_illegal_cand)
         illegal_instr = 1'b1;
 
+      // vtype.vill set: every instruction that depends on vtype is illegal
+      if (decoder_req_i.vtype.vill &&
+          ( spatz_req.ex_unit inside {LSU, SLD} ||
+           (spatz_req.ex_unit == VFU &&
+            (!spatz_req.op_arith.is_scalar || spatz_req.use_vs2)) ))
+        illegal_instr = 1'b1;
+
       // Add correct reset_vstart value
       spatz_req.op_cfg.reset_vstart = illegal_instr ? 1'b0 : reset_vstart;
       spatz_req.rd                  = decoder_req_i.rd;

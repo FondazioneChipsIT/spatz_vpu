@@ -990,42 +990,21 @@ module spatz_controller
     issue_rsp_o.isfloat = |running_insn_q;
 
     // We have a new valid instruction
-    if (decoder_rsp_valid && !decoder_rsp.instr_illegal) begin
+    if (decoder_rsp_valid && !decoder_rsp_illegal) begin
       // Accept the new instruction
       issue_rsp_o.accept = 1'b1;
 
       case (decoder_rsp.spatz_req.ex_unit)
         CON: begin
-          issue_rsp_o.writeback = spatz_req.use_rd;
-        end
-        VFU: begin
-          // Do not check vtype for scalar operations running on the spatz VFU
-          // but check vtype for vfmv.f.s and vmv.x.s that have is_scalar=1 and use_vs2=1
-          if (!decoder_rsp.spatz_req.op_arith.is_scalar || decoder_rsp.spatz_req.use_vs2) begin
-            // vtype is illegal -> illegal instruction
-            if (vtype_q.vill) begin
-              issue_rsp_o.accept = 1'b0;
-              issue_rsp_o.exception = 1'b1;
-            end
-          end
+          issue_rsp_o.writeback = decoder_rsp.spatz_req.use_rd;
         end
         LSU: begin
           issue_rsp_o.loadstore = 1'b1;
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-            issue_rsp_o.exception = 1'b1;
-          end
-        end
-        SLD: begin
-          if (vtype_q.vill) begin
-            issue_rsp_o.accept = 1'b0;
-            issue_rsp_o.exception = 1'b1;
-          end
         end
         default:;
       endcase // Operation type
     // The decoding resulted in an illegal instruction
-    end else if (decoder_rsp_valid && decoder_rsp.instr_illegal) begin
+    end else if (decoder_rsp_illegal) begin
       // Do not accept it
       issue_rsp_o.accept = 1'b0;
       issue_rsp_o.exception = 1'b1;
