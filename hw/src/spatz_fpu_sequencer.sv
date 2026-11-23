@@ -775,7 +775,14 @@ module spatz_fpu_sequencer
     end
     // Commit moves to the RF
     else if (is_move && use_fd && !stall) begin
-      fpr_wdata[1] = issue_req_i.data_arga;
+      // fmv.{b,h,w}.x must NaN-box the narrow value to FLEN
+      fpr_wdata[1] = '1;
+      unique casez (issue_req_i.data_op)
+        riscv_instr::FMV_B_X: fpr_wdata[1][7:0]  = issue_req_i.data_arga[7:0];
+        riscv_instr::FMV_H_X: fpr_wdata[1][15:0] = issue_req_i.data_arga[15:0];
+        riscv_instr::FMV_W_X: fpr_wdata[1][31:0] = issue_req_i.data_arga[31:0];
+        default:              fpr_wdata[1]       = issue_req_i.data_arga;
+      endcase
       fpr_waddr[1] = fd;
       fpr_we[1]    = 1'b1;
     end

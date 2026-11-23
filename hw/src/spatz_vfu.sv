@@ -413,13 +413,13 @@ module spatz_vfu
             fpu_src_fmt      = spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 ? fpnew_pkg::FP64 : fpnew_pkg::FP32;
             fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2                                    ? fpnew_pkg::FP64 : fpnew_pkg::FP32;
             fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}                             ? fpnew_pkg::INT64: fpnew_pkg::INT32;
-            fpu_vectorial_op = FLEN > 32;
+            fpu_vectorial_op = (FLEN > 32) && !spatz_req.op_arith.is_scalar;
           end
           EW_16: begin
             fpu_src_fmt      = spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2 ? fpnew_pkg::FP32 : (spatz_req.fm.src ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16);
             fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2                                    ? fpnew_pkg::FP32 : (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16);
             fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}                             ? fpnew_pkg::INT32 : fpnew_pkg::INT16;
-            fpu_vectorial_op = 1'b1;
+            fpu_vectorial_op = !spatz_req.op_arith.is_scalar;
           end
           EW_8: begin
             if (spatz_req.op_arith.is_narrowing)
@@ -430,7 +430,7 @@ module spatz_vfu
               fpu_src_fmt = fpnew_pkg::FP8;
             fpu_dst_fmt      = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2          ? (spatz_req.fm.dst ? fpnew_pkg::FP16ALT : fpnew_pkg::FP16) : fpnew_pkg::FP8;
             fpu_int_fmt      = spatz_req.op_arith.is_narrowing && spatz_req.op inside {VI2F, VU2F}   ? fpnew_pkg::INT16 : fpnew_pkg::INT8;
-            fpu_vectorial_op = 1'b1;
+            fpu_vectorial_op = !spatz_req.op_arith.is_scalar;
           end
           default:;
         endcase
@@ -653,6 +653,8 @@ module spatz_vfu
               operand2 = vrf_rdata_i[0];
             else if ((!spatz_req.op_arith.is_scalar || spatz_req.op == VADD) && spatz_req.use_vs2)
               operand2 = spatz_req.op_arith.is_reduction ? $unsigned(reduction_q[0]) : vrf_rdata_masked[0];
+            else if (spatz_req.op_arith.is_scalar)
+              operand2 = {1*N_FU{spatz_req.rs2}};
             else
               // Replicate scalar operands
               unique case (spatz_req.vtype.vsew)
