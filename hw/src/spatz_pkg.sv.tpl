@@ -560,15 +560,51 @@ package spatz_pkg;
   } spatz_fp8alt_t;
 
   function automatic spatz_fp64_t widen_fp32_to_fp64(spatz_fp32_t operand);
-    widen_fp32_to_fp64.sign     = operand.sign;
-    widen_fp32_to_fp64.exponent = int'(operand.exponent - 127) + 1023;
-    widen_fp32_to_fp64.mantissa = {operand.mantissa, 29'b0};
+    automatic logic [22:0]  mant = operand.mantissa;
+    automatic int unsigned  lz   = 0;
+
+    widen_fp32_to_fp64.sign = operand.sign;
+
+    if (operand.exponent == '1) begin                 // Inf / NaN
+      widen_fp32_to_fp64.exponent = '1;
+      widen_fp32_to_fp64.mantissa = {mant, 29'b0};    // keeps quiet bit -> sNaN stays sNaN
+    end else if (operand.exponent == '0) begin
+      if (mant == '0) begin                           // ±0
+        widen_fp32_to_fp64.exponent = '0;
+        widen_fp32_to_fp64.mantissa = '0;
+      end else begin                                  // subnormal -> normal
+        for (int i = 0; i < 23; i++) if (mant[i]) lz = 22 - i;   // leading-zero count (highest set bit wins)
+        widen_fp32_to_fp64.exponent = 11'(896 - lz);  // 1023 - 127 - lz
+        widen_fp32_to_fp64.mantissa = {23'(mant << (lz + 1)), 29'b0}; // drop the leading 1
+      end
+    end else begin                                    // normal
+      widen_fp32_to_fp64.exponent = 11'(operand.exponent) + 11'd896;
+      widen_fp32_to_fp64.mantissa = {mant, 29'b0};
+    end
   endfunction
 
   function automatic spatz_fp32_t widen_fp16_to_fp32(spatz_fp16_t operand);
-    widen_fp16_to_fp32.sign     = operand.sign;
-    widen_fp16_to_fp32.exponent = int'(operand.exponent - 15) + 127;
-    widen_fp16_to_fp32.mantissa = {operand.mantissa, 13'b0};
+    automatic logic [9:0]  mant = operand.mantissa;
+    automatic int unsigned lz   = 0;
+
+    widen_fp16_to_fp32.sign = operand.sign;
+
+    if (operand.exponent == '1) begin                 // Inf / NaN
+      widen_fp16_to_fp32.exponent = '1;
+      widen_fp16_to_fp32.mantissa = {mant, 13'b0};
+    end else if (operand.exponent == '0) begin
+      if (mant == '0) begin                           // ±0
+        widen_fp16_to_fp32.exponent = '0;
+        widen_fp16_to_fp32.mantissa = '0;
+      end else begin                                  // subnormal -> normal
+        for (int i = 0; i < 10; i++) if (mant[i]) lz = 9 - i;
+        widen_fp16_to_fp32.exponent = 8'(112 - lz);   // 127 - 15 - lz
+        widen_fp16_to_fp32.mantissa = {10'(mant << (lz + 1)), 13'b0};
+      end
+    end else begin                                    // normal
+      widen_fp16_to_fp32.exponent = 8'(operand.exponent) + 8'd112;
+      widen_fp16_to_fp32.mantissa = {mant, 13'b0};
+    end
   endfunction
 
   function automatic spatz_fp16_t widen_fp8_to_fp16(spatz_fp8_t operand);
@@ -578,21 +614,32 @@ package spatz_pkg;
   endfunction
   
   function automatic spatz_fp16alt_t widen_fp8_to_fp16alt(spatz_fp8_t operand);
-    widen_fp8_to_fp16alt.sign     = operand.sign;
-    widen_fp8_to_fp16alt.exponent = (operand.exponent == '0) ? '0 : operand.exponent + 112;
-    widen_fp8_to_fp16alt.mantissa = {operand.mantissa, 5'b0};
+    automatic logic [1:0]  mant = operand.mantissa;
+    automatic int unsigned lz   = mant[1] ? 0 : 1;   // only used when mant != 0
+
+    widen_fp8_to_fp16alt.sign = operand.sign;
+
+    if (operand.exponent == '1) begin                 // Inf / NaN
+      widen_fp8_to_fp16alt.exponent = '1;
+      widen_fp8_to_fp16alt.mantissa = {mant, 5'b0};
+    end else if (operand.exponent == '0) begin
+      if (mant == '0) begin                           // ±0
+        widen_fp8_to_fp16alt.exponent = '0;
+        widen_fp8_to_fp16alt.mantissa = '0;
+      end else begin                                  // subnormal -> normal
+        widen_fp8_to_fp16alt.exponent = 8'(112 - lz); // 127 - 15 - lz
+        widen_fp8_to_fp16alt.mantissa = {2'(mant << (lz + 1)), 5'b0};
+      end
+    end else begin                                    // normal
+      widen_fp8_to_fp16alt.exponent = 8'(operand.exponent) + 8'd112;
+      widen_fp8_to_fp16alt.mantissa = {mant, 5'b0};
+    end
   endfunction
 
   function automatic spatz_fp16_t widen_fp8alt_to_fp16(spatz_fp8alt_t operand);
     widen_fp8alt_to_fp16.sign = operand.sign;
     widen_fp8alt_to_fp16.exponent = operand.exponent + 8;
     widen_fp8alt_to_fp16.mantissa = {operand.mantissa, 7'b0};
-  endfunction
-
-  function automatic spatz_fp16alt_t widen_fp8alt_to_fp16alt(spatz_fp8alt_t operand);
-    widen_fp8alt_to_fp16alt.sign = operand.sign;
-    widen_fp8alt_to_fp16alt.exponent = operand.exponent + 120;
-    widen_fp8alt_to_fp16alt.mantissa = {operand.mantissa, 4'b0};
   endfunction
 
   function automatic spatz_fp32_t widen_fp16alt_to_fp32(spatz_fp16alt_t operand);
