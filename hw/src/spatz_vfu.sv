@@ -1869,6 +1869,20 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
       `FFL(input_tag_q, input_tag, int_fpu_in_valid && int_fpu_in_ready, '{vsew: EW_8, default: '0})
       `FFL(fpu_in_valid_q, int_fpu_in_valid_gated, int_fpu_in_ready, 1'b0)
 
+      localparam int unsigned FpuNumLanes = fpnew_pkg::max_num_lanes(FPUFeatures.Width, FPUFeatures.FpFmtMask, FPUFeatures.EnableVectors);
+      logic [FpuNumLanes-1:0] fpu_simd_mask;
+
+      always_comb begin : gen_simd_mask
+        // A lane is valid if the widest format of the op fits in it
+        automatic int unsigned op_width = fpnew_pkg::maximum(fpnew_pkg::fp_width(fpu_src_fmt_q),
+                                                            fpnew_pkg::fp_width(fpu_dst_fmt_q));
+        if (fpu_op_q inside {fpnew_pkg::F2I, fpnew_pkg::I2F})
+          op_width = fpnew_pkg::maximum(op_width, fpnew_pkg::int_width(fpu_int_fmt_q));
+
+        for (int l = 0; l < FpuNumLanes; l++)
+          fpu_simd_mask[l] = fpu_vectorial_op_q ? (l < ELEN / op_width) : (l == 0);
+      end
+
 
       assign int_fpu_in_ready = !fpu_in_valid_q || fpu_in_valid_q && fpu_in_ready_d;
       assign fpu_load_ready[fpu] = int_fpu_in_valid_gated && int_fpu_in_ready;
@@ -1879,7 +1893,8 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
       fpnew_top #(
         .Features                   (FPUFeatures           ),
         .Implementation             (FPUImpl               ),
-        .TagType                    (vfu_tag_t             )
+        .TagType                    (vfu_tag_t             ),
+        .EnableSIMDMask             (1                     )
       ) i_fpu (
         .clk_i         (clk_i                                                  ),
         .rst_ni        (rst_ni                                                 ),
@@ -1896,7 +1911,7 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
         .vectorial_op_i(fpu_vectorial_op_q                                     ),
         .op_mod_i      (fpu_op_mode_q                                          ),
         .tag_i         (input_tag_q                                            ),
-        .simd_mask_i   ('1                                                     ),
+        .simd_mask_i   (fpu_simd_mask                                          ),
         .rnd_mode_i    (rm_q                                                   ),
         .result_o      (fpu_result[fpu*ELEN +: ELEN]                           ),
         .out_valid_o   (int_fpu_result_valid                                   ),
