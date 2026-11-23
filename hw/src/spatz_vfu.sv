@@ -129,7 +129,18 @@ module spatz_vfu
   assign is_divsqrt_insn = spatz_req.op inside {VFDIV, VFSQRT};
 
   logic divsqrt_shared_active;
-  assign divsqrt_shared_active = is_divsqrt_insn && divsqrt_is_shared;
+  // Shared mode only starts once older FPU ops have drained (set in the DIV/SQRT section)
+  logic divsqrt_started_q, divsqrt_started_d;
+  `FF(divsqrt_started_q, divsqrt_started_d, 1'b0)
+  // No FPU holds an operation or a result (assigned in the DIV/SQRT section)
+  logic divsqrt_fpu_idle;
+  // Enter shared mode in the same cycle the FPUs are found idle, then hold it with divsqrt_started_q
+  assign divsqrt_shared_active = is_divsqrt_insn && divsqrt_is_shared &&
+                                 (divsqrt_started_q || (spatz_req_valid && divsqrt_fpu_idle));
+
+  // A shared div/sqrt is waiting for the FPUs to drain
+  logic divsqrt_wait;
+  assign divsqrt_wait = spatz_req_valid && is_divsqrt_insn && divsqrt_is_shared && !divsqrt_started_q && !divsqrt_fpu_idle;
 
   assign nr_elem_word_divsqrt = (1 << (MAXEW - spatz_req.vtype.vsew));
 
@@ -253,6 +264,8 @@ module spatz_vfu
   logic [$clog2(N_FU)-1:0] divsqrt_slot_q, divsqrt_slot_d;
   logic divsqrt_inflight_q, divsqrt_inflight_d;
   logic last_divsqrt;
+  // Handshake on FPU0 output
+  logic divsqrt_pop;
 
   assign last_divsqrt = divsqrt_shared_active ? ((vl_q + (divsqrt_slot_q+1)*nr_elem_word_divsqrt) >= spatz_req.vl) : 1'b0;
 
@@ -323,11 +336,14 @@ module spatz_vfu
         default:;
       endcase
 
+    // Do not issue a shared div/sqrt while older FPU results are in flight
+    if (divsqrt_wait) stall = 1'b1;
+
     // Finished the execution!
     if (spatz_req_valid && ((vl_d >= spatz_req.vl && !spatz_req.op_arith.is_reduction) || reduction_done || last_divsqrt)) begin
       if(divsqrt_shared_active) begin
           last_request            = 1'b1;
-        if(result_tag.last)begin
+        if(divsqrt_pop && result_tag.last)begin
           spatz_req_ready         = spatz_req_valid;
           busy_d                  = 1'b0;
           vl_d                    = '0;
@@ -712,9 +728,6 @@ module spatz_vfu
   logic divsqrt_shared_ready;
   logic divsqrt_closing_slot;
 
-  // Handshake on FPU0 output
-  logic divsqrt_pop;
-
   logic divsqrt_done_q, divsqrt_done_d;
   `FF(divsqrt_done_q, divsqrt_done_d, 1'b0)
 
@@ -726,6 +739,17 @@ module spatz_vfu
     else if (fpu_load_ready[0])
       divsqrt_done_d = 1'b0;
   end : proc_divsqrt_done
+
+  // fpnew busy_o / out_valid_o only depend on registers (inputs come from fpu_*_q), so no comb loop
+  assign divsqrt_fpu_idle = !is_fpu_busy && !(|fpu_result_valid);
+
+  always_comb begin : proc_divsqrt_started
+    divsqrt_started_d = divsqrt_started_q;
+    if (spatz_req_ready)
+      divsqrt_started_d = 1'b0;   // instruction retired
+    else if (divsqrt_shared_active)
+      divsqrt_started_d = 1'b1;   // keep shared mode once the FPUs get busy with the div
+  end : proc_divsqrt_started
 
   // This result completes the VRF word: last slot or last element of the instruction
   assign divsqrt_closing_slot = (divsqrt_slot_q == N_FU - 1) || result_tag.last;
