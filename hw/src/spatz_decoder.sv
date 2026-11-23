@@ -80,6 +80,17 @@ module spatz_decoder
     if ((7'(vd_idx) + regs_tot) > 7'd32) emul_illegal_cand = 1'b1;
   end
 
+  // Effective scalar rounding mode (RISC-V F: static rm overrides frm, DYN selects frm)
+  logic [2:0]  instr_rm;
+  roundmode_e  scalar_rm;
+  logic        scalar_rm_illegal;
+
+  assign instr_rm          = decoder_req_i.instr[14:12];
+  assign scalar_rm         = (instr_rm == 3'b111) ? fpu_rnd_mode_i : roundmode_e'(instr_rm);
+  assign scalar_rm_illegal = (instr_rm inside {3'b101, 3'b110}) ||
+                            (instr_rm == 3'b111 && fpu_rnd_mode_i inside {3'b101, 3'b110, 3'b111});
+
+
   always_comb begin : decoder
     illegal_instr = 1'b0;
     spatz_req     = '0;
@@ -1682,9 +1693,10 @@ module spatz_decoder
             spatz_req.rs2                = decoder_req_i.rs2;
             spatz_req.rsd                = decoder_req_i.rsd;
             spatz_req.op_arith.is_scalar = 1'b1;
-            spatz_req.rm                 = fpu_rnd_mode_i;
+            spatz_req.rm                 = scalar_rm;
             spatz_req.fm                 = fpu_fmt_mode_i;
             spatz_req.vtype.vsew         = EW_8;
+            if (scalar_rm_illegal) illegal_instr = 1'b1;
 
             unique casez (decoder_req_i.instr)
               riscv_instr::FADD_B : spatz_req.op = VFADD;
@@ -1731,11 +1743,9 @@ module spatz_decoder
               riscv_instr::FCVT_B_WU: spatz_req.op = VU2F;
               riscv_instr::FCVT_W_B : begin
                 spatz_req.op = VF2I;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_WU_B: begin
                 spatz_req.op = VF2U;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_H_B : begin
                 spatz_req.op                 = VF2F;
@@ -1788,9 +1798,10 @@ module spatz_decoder
             spatz_req.rs2                = decoder_req_i.rs2;
             spatz_req.rsd                = decoder_req_i.rsd;
             spatz_req.op_arith.is_scalar = 1'b1;
-            spatz_req.rm                 = fpu_rnd_mode_i;
+            spatz_req.rm                 = scalar_rm;
             spatz_req.fm                 = fpu_fmt_mode_i;
             spatz_req.vtype.vsew         = EW_16;
+            if (scalar_rm_illegal) illegal_instr = 1'b1;
 
             unique casez (decoder_req_i.instr)
               riscv_instr::FDIV_H  : spatz_req.op = VFDIV;
@@ -1839,11 +1850,9 @@ module spatz_decoder
               riscv_instr::FCVT_H_WU: spatz_req.op = VU2F;
               riscv_instr::FCVT_W_H : begin
                 spatz_req.op = VF2I;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_WU_H: begin
                 spatz_req.op = VF2U;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_S_H : begin
                 spatz_req.op                 = VF2F;
@@ -1897,9 +1906,10 @@ module spatz_decoder
             spatz_req.rs2                = decoder_req_i.rs2;
             spatz_req.rsd                = decoder_req_i.rsd;
             spatz_req.op_arith.is_scalar = 1'b1;
-            spatz_req.rm                 = fpu_rnd_mode_i;
+            spatz_req.rm                 = scalar_rm;
             spatz_req.fm                 = fpu_fmt_mode_i;
             spatz_req.vtype.vsew         = EW_32;
+            if (scalar_rm_illegal) illegal_instr = 1'b1;
 
             unique casez (decoder_req_i.instr)
               riscv_instr::FDIV_S  : spatz_req.op = VFDIV;
@@ -1948,11 +1958,9 @@ module spatz_decoder
               riscv_instr::FCVT_S_WU: spatz_req.op = VU2F;
               riscv_instr::FCVT_W_S : begin
                 spatz_req.op = VF2I;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_WU_S: begin
                 spatz_req.op = VF2U;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_D_S: begin
                 spatz_req.op                 = VF2F;
@@ -2004,9 +2012,10 @@ module spatz_decoder
             spatz_req.rs2                = decoder_req_i.rs2;
             spatz_req.rsd                = decoder_req_i.rsd;
             spatz_req.op_arith.is_scalar = 1'b1;
-            spatz_req.rm                 = fpu_rnd_mode_i;
+            spatz_req.rm                 = scalar_rm;
             spatz_req.fm                 = fpu_fmt_mode_i;
             spatz_req.vtype.vsew         = EW_64;
+            if (scalar_rm_illegal) illegal_instr = 1'b1;
 
             unique casez (decoder_req_i.instr)
               riscv_instr::FDIV_D  : spatz_req.op = VFDIV;
@@ -2055,11 +2064,9 @@ module spatz_decoder
               riscv_instr::FCVT_D_WU: spatz_req.op = VU2F;
               riscv_instr::FCVT_W_D : begin
                 spatz_req.op = VF2I;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FCVT_WU_D: begin
                 spatz_req.op = VF2U;
-                spatz_req.rm = fpnew_pkg::roundmode_e'(decoder_req_i.instr[14:12]);
               end
               riscv_instr::FMADD_D  : spatz_req.op = VFMADD;
               riscv_instr::FMSUB_D  : spatz_req.op = VFMSUB;
