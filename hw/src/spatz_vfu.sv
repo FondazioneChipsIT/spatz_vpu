@@ -1836,6 +1836,12 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
               wide_operand2[32*el +: 32] = spatz_req.fm.src ? widen_fp16alt_to_fp32(shift_operand2[16*el +: 16])
                                                             : widen_fp16_to_fp32(shift_operand2[16*el +: 16]);
           end
+          // Scalar widening (e.g. fcvt.s.h) runs non-vectorial on an ELEN-wide FPU:
+          // NaN-box the widened FP32 operand, otherwise fpnew sees a NaN
+          if (spatz_req.op_arith.is_scalar && ELEN > 32) begin
+            if (spatz_req.op_arith.widen_vs1) wide_operand1[ELEN-1:32] = '1;
+            if (spatz_req.op_arith.widen_vs2) wide_operand2[ELEN-1:32] = '1;
+          end
         end
         EW_8: begin
           for (int el = 0; el < (MAXEW == EW_64 ? 4*N_FPU : 2*N_FPU); el++) begin
@@ -1852,6 +1858,11 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
                 1'b1:  wide_operand2[16*el +: 16] = widen_fp8_to_fp16alt(shift_operand2[8*el +: 8]);
               endcase
             end
+          end
+          // Scalar widening (e.g. fcvt.h.b): NaN-box the widened FP16 operand
+          if (spatz_req.op_arith.is_scalar) begin
+            if (spatz_req.op_arith.widen_vs1) wide_operand1[ELEN-1:16] = '1;
+            if (spatz_req.op_arith.widen_vs2) wide_operand2[ELEN-1:16] = '1;
           end
         end
         default:;
