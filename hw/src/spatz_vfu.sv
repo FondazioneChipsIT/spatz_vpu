@@ -569,7 +569,7 @@ module spatz_vfu
   // Operands and result signals
   logic [N_FU*ELEN-1:0]  operand1, operand2, operand3;
   logic [N_FU*ELENB-1:0] in_ready;
-  
+
   logic v0_t_read_done;
   logic switch_to_read_v0t;
   assign switch_to_read_v0t = (operand_state_q == READ_OPERANDS) && spatz_req_valid
@@ -627,7 +627,7 @@ module spatz_vfu
   `FF(cmp_mask_dst_q,           cmp_mask_dst_d,           '0)
   `FF(reduction_operand_v0_t_q, reduction_operand_v0_t_d, '0)
 
-  // The signal to choose comparison instructions  
+  // The signal to choose comparison instructions
   logic is_cmp_req;
   assign is_cmp_req = (spatz_req.op == VFCMP) || spatz_req.op inside {VMSEQ, VMSNE, VMSLT, VMSLTU, VMSLE, VMSLEU, VMSGT, VMSGTU};
 

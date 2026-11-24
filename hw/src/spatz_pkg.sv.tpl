@@ -612,7 +612,7 @@ package spatz_pkg;
     widen_fp8_to_fp16.exponent = operand.exponent;
     widen_fp8_to_fp16.mantissa = {operand.mantissa, 8'b0};
   endfunction
-  
+
   function automatic spatz_fp16alt_t widen_fp8_to_fp16alt(spatz_fp8_t operand);
     automatic logic [1:0]  mant = operand.mantissa;
     automatic int unsigned lz   = mant[1] ? 0 : 1;   // only used when mant != 0
