@@ -271,6 +271,18 @@ module spatz_vfu
 
   `FF(word_idx_q, word_idx_d, '0)
 
+  // Compare mask: the destination mask can span several VRF words (SEW=8, vl > VRFWordWidth).
+  // 2^(3+vsew) result words fill one VRF word of mask bits.
+  logic [$clog2(NrWordsPerVector*8):0] cmp_slot;    // result word inside current mask word
+  logic [$clog2(NrWordsPerVector*8):0] cmp_mw_idx;  // mask word being filled
+  logic                                cmp_mw_full; // current mask word complete -> write it
+  always_comb begin
+    automatic int unsigned sh = 3 + int'(result_tag.vsew);
+    cmp_slot    = word_idx_q & ((1 << sh) - 1);
+    cmp_mw_idx  = word_idx_q >> sh;
+    cmp_mw_full = result_tag.last || (cmp_slot == ((1 << sh) - 1));
+  end
+
   // All the results of the current VRF word in the FUs are ready
   logic fu_word_complete;
   assign fu_word_complete = &(result_valid | ~pending_results);
@@ -563,42 +575,70 @@ module spatz_vfu
 
   // Operands and result signals
   logic [N_FU*ELEN-1:0]  operand1, operand2, operand3;
-  logic [N_FU*ELEN-1:0]  operand_v0_t_lo,operand_v0_t_lo_q;
-  logic [N_FU*ELEN-1:0]  operand_v0_t_hi,operand_v0_t_hi_q;
   logic [N_FU*ELENB-1:0] in_ready;
+  
+  logic v0_t_read_done;
+  logic switch_to_read_v0t;
+  assign switch_to_read_v0t = (operand_state_q == READ_OPERANDS) && spatz_req_valid
+                          && !spatz_req.op_arith.is_scalar && !spatz_req.op_arith.vm
+                          && !v0_t_read_done && !spatz_req.op_arith.is_reduction;
 
-  logic reduction_v0_t_is_ready;
-  assign reduction_v0_t_is_ready = (reduction_state_q == Reduction_Read_V0_t) && vrf_rvalid_i[0] && vrf_rvalid_i[1];
+  // Whole-register mask reads (v0 / old vd): 2 VRF words per cycle (read ports 0 and 1)
+  localparam int unsigned NrMaskReads = (NrWordsPerVector + 1) / 2;
+  localparam int unsigned MaskRdCntW  = (NrMaskReads > 1) ? $clog2(NrMaskReads) : 1;
+
+  logic [MaskRdCntW-1:0] mrd_cnt_q, mrd_cnt_d;
+  logic mrd_v0, mrd_vd, mrd_red;        // which register is being read
+  logic mrd_hi;                         // port 1 carries a valid word this cycle
+  logic mrd_pair_valid, mrd_last;
+
+  assign mrd_v0  = (operand_state_q == READ_V0_t);
+  assign mrd_vd  = (operand_state_q == READ_VD_t);
+  assign mrd_red = (operand_state_q == READ_OPERANDS) && !switch_to_read_v0t
+                && (reduction_state_q == Reduction_Read_V0_t);
+  assign mrd_hi  = (2*mrd_cnt_q + 1) < NrWordsPerVector;
+  assign mrd_pair_valid = (mrd_v0 || mrd_vd || mrd_red)
+                       && vrf_rvalid_i[0] && (vrf_rvalid_i[1] || !mrd_hi);
+  assign mrd_last = (mrd_cnt_q == MaskRdCntW'(NrMaskReads - 1));
+  assign mrd_cnt_d = mrd_pair_valid ? (mrd_last ? '0 : mrd_cnt_q + 1) : mrd_cnt_q;
+  `FF(mrd_cnt_q, mrd_cnt_d, '0)
+
+  // "ready" now means: last pair of the register has arrived
+  logic v0_t_is_ready, vd_t_is_ready, reduction_v0_t_is_ready;
+  assign v0_t_is_ready           = mrd_v0  && mrd_pair_valid && mrd_last;
+  assign vd_t_is_ready           = mrd_vd  && mrd_pair_valid && mrd_last;
+  assign reduction_v0_t_is_ready = mrd_red && mrd_pair_valid && mrd_last;
+
   logic reduction_v0_t_read_done;
   `FFLARNC(reduction_v0_t_read_done,1'b1,reduction_v0_t_is_ready,vfu_rsp_valid_o,1'b0,clk_i,rst_ni);
 
-  // Back up v0.t for reduction instructions
-  logic [N_FU*ELEN-1:0]  reduction_operand_v0_t_lo,reduction_operand_v0_t_lo_q;
-  logic [N_FU*ELEN-1:0]  reduction_operand_v0_t_hi,reduction_operand_v0_t_hi_q;
-  `FFL(reduction_operand_v0_t_lo_q, reduction_operand_v0_t_lo, reduction_v0_t_is_ready, '0)
-  `FFL(reduction_operand_v0_t_hi_q, reduction_operand_v0_t_hi, reduction_v0_t_is_ready, '0)
-  logic [VLEN-1:0] reduction_operand_v0_t_q;
-  assign reduction_operand_v0_t_q = {reduction_operand_v0_t_hi_q, reduction_operand_v0_t_lo_q};
-
   // FF to back up the mask destination register for comparison instructions
-  logic [N_FU*ELEN-1:0] cmp_mask_dst_lo, cmp_mask_dst_lo_q;
-  logic [N_FU*ELEN-1:0] cmp_mask_dst_hi, cmp_mask_dst_hi_q;
+  logic [VLEN-1:0] operand_v0_t_q,           operand_v0_t_d;
+  logic [VLEN-1:0] cmp_mask_dst_q,           cmp_mask_dst_d;
+  logic [VLEN-1:0] reduction_operand_v0_t_q, reduction_operand_v0_t_d;
 
-  logic [VLEN-1:0] operand_v0_t_q;
-  assign operand_v0_t_q = {operand_v0_t_hi_q, operand_v0_t_lo_q};
-  logic [VLEN-1:0] cmp_mask_dst_q;
-  assign cmp_mask_dst_q = {cmp_mask_dst_hi_q, cmp_mask_dst_lo_q};
+  always_comb begin : mask_capture
+    operand_v0_t_d           = operand_v0_t_q;
+    cmp_mask_dst_d           = cmp_mask_dst_q;
+    reduction_operand_v0_t_d = reduction_operand_v0_t_q;
+    if (mrd_pair_valid)
+      for (int w = 0; w < NrWordsPerVector; w++)
+        if (w == 2*mrd_cnt_q || w == 2*mrd_cnt_q + 1) begin
+          automatic vrf_data_t word = vrf_rdata_i[w - 2*mrd_cnt_q];
+          if (mrd_v0)  operand_v0_t_d          [w*VRFWordWidth +: VRFWordWidth] = word;
+          if (mrd_vd)  cmp_mask_dst_d          [w*VRFWordWidth +: VRFWordWidth] = word;
+          if (mrd_red) reduction_operand_v0_t_d[w*VRFWordWidth +: VRFWordWidth] = word;
+        end
+  end
+  `FF(operand_v0_t_q,           operand_v0_t_d,           '0)
+  `FF(cmp_mask_dst_q,           cmp_mask_dst_d,           '0)
+  `FF(reduction_operand_v0_t_q, reduction_operand_v0_t_d, '0)
 
-    // The signal to choose comparison instructions  
+  // The signal to choose comparison instructions  
   logic is_cmp_req;
   assign is_cmp_req = (spatz_req.op == VFCMP) || spatz_req.op inside {VMSEQ, VMSNE, VMSLT, VMSLTU, VMSLE, VMSLEU, VMSGT, VMSGTU};
 
   // FSM to manage operands between normal calculation and v0.t fetching
-  logic v0_t_is_ready;
-  assign v0_t_is_ready   = (operand_state_q == READ_V0_t) && vrf_rvalid_i[0] && vrf_rvalid_i[1];
-  logic vd_t_is_ready;
-  assign vd_t_is_ready   = (operand_state_q == READ_VD_t) && vrf_rvalid_i[0] && vrf_rvalid_i[1];
-  logic v0_t_read_done;
   logic v0_t_read_done_d;
   always_comb begin
     v0_t_read_done_d = v0_t_read_done;
@@ -611,11 +651,6 @@ module spatz_vfu
     end
   end
   `FF(v0_t_read_done,v0_t_read_done_d,1'b0,clk_i,rst_ni);
-
-  logic switch_to_read_v0t;
-  assign switch_to_read_v0t = (operand_state_q == READ_OPERANDS) && spatz_req_valid
-                          && !spatz_req.op_arith.is_scalar && !spatz_req.op_arith.vm
-                          && !v0_t_read_done && !spatz_req.op_arith.is_reduction;
 
   always_comb begin: operand_selection
     operand_state_d = operand_state_q;
@@ -635,21 +670,11 @@ module spatz_vfu
   assign vl_q_plus_nr_elem_word = vl_q + nr_elem_word;
 
   always_comb begin: operand_proc
-    reduction_operand_v0_t_lo = '0;
-    reduction_operand_v0_t_hi = '0;
-    operand_v0_t_lo = '0;
-    operand_v0_t_hi = '0;
-    cmp_mask_dst_lo = '0;
-    cmp_mask_dst_hi = '0;
     operand1 = '0;
     operand2 = '0;
     case (operand_state_q)
       READ_OPERANDS: begin
-          if(reduction_state_q == Reduction_Read_V0_t) begin
-            reduction_operand_v0_t_lo = vrf_rdata_i[0];
-            reduction_operand_v0_t_hi = vrf_rdata_i[1];
-          end
-          else begin
+          if(reduction_state_q != Reduction_Read_V0_t) begin
             if (spatz_req.op_arith.is_scalar)
               operand1 = {1*N_FU{spatz_req.rs1}};
             else if (spatz_req.use_vs1)
@@ -693,14 +718,6 @@ module spatz_vfu
               operand1 = (operand1 & mmask) | (operand2 & ~mmask);
             end
           end
-      end
-      READ_V0_t: begin
-        operand_v0_t_lo = vrf_rdata_i[0];
-        operand_v0_t_hi = vrf_rdata_i[1];
-      end
-      READ_VD_t: begin
-        cmp_mask_dst_lo = vrf_rdata_i[0];
-        cmp_mask_dst_hi = vrf_rdata_i[1];
       end
       default:;
     endcase
@@ -818,12 +835,6 @@ module spatz_vfu
     else if (divsqrt_pop)
       divsqrt_inflight_d = 1'b0;
   end : proc_divsqrt_inflight
-
-
-  `FFL(operand_v0_t_lo_q, operand_v0_t_lo, v0_t_is_ready, '0)
-  `FFL(operand_v0_t_hi_q, operand_v0_t_hi, v0_t_is_ready, '0)
-  `FFL(cmp_mask_dst_lo_q, cmp_mask_dst_lo, vd_t_is_ready, '0)
-  `FFL(cmp_mask_dst_hi_q, cmp_mask_dst_hi, vd_t_is_ready, '0)
 
   // Inactive elements are set to 1 under ma and left undisturbed under mu
   logic [VLEN-1:0] cmp_dst_inactive;
@@ -1026,7 +1037,7 @@ module spatz_vfu
         word_issued = fu_can_accept && fu_word_can_advance;
 
         // Are we ready to accept a result?
-        result_ready = fu_word_complete && ((result_tag.wb && vfu_rsp_ready_i) || vrf_wvalid_i || (result_tag.is_cmp && !result_tag.last));
+        result_ready = fu_word_complete && ((result_tag.wb && vfu_rsp_ready_i) || vrf_wvalid_i || (result_tag.is_cmp && !cmp_mw_full));
 
         // Initialize the pointers
         reduction_pointer_d = '0;
@@ -1319,7 +1330,7 @@ module spatz_vfu
     vreg_addr_d = vreg_addr_q;
 
     vrf_raddr_o = vreg_addr_d;
-    vrf_waddr_o = vrf_addr_t'(result_tag.vd_addr);
+    vrf_waddr_o = vrf_addr_t'(result_tag.vd_addr) + (result_tag.is_cmp ? vrf_addr_t'(cmp_mw_idx) : '0);
 
     // Tag (propagated with the operations)
     input_tag = '{
@@ -1346,8 +1357,8 @@ module spatz_vfu
           vrf_raddr_o = vreg_addr_d;
 
         end else if(reduction_state_q == Reduction_Read_V0_t) begin
-          vreg_addr_d[0] =  0 << $clog2(NrWordsPerVector);
-          vreg_addr_d[1] =  1 << $clog2(NrWordsPerVector);
+          vreg_addr_d[0] = vrf_addr_t'(2*mrd_cnt_q);
+          vreg_addr_d[1] = vrf_addr_t'(2*mrd_cnt_q + 1);
           vrf_raddr_o = vreg_addr_d;
         end
         else begin
@@ -1376,13 +1387,13 @@ module spatz_vfu
         end
        end
        READ_V0_t: begin
-         vreg_addr_d[0] = ( 0 + vstart) << $clog2(NrWordsPerVector);
-         vreg_addr_d[1] = ( 1 + vstart) << $clog2(NrWordsPerVector);
+         vreg_addr_d[0] = vrf_addr_t'(2*mrd_cnt_q);
+         vreg_addr_d[1] = vrf_addr_t'(2*mrd_cnt_q + 1);
          vrf_raddr_o = vreg_addr_d;
        end
        READ_VD_t: begin
-          vreg_addr_d[0] = spatz_req.vd << $clog2(NrWordsPerVector);
-          vreg_addr_d[1] = (spatz_req.vd << $clog2(NrWordsPerVector)) + 1;
+          vreg_addr_d[0] = (spatz_req.vd << $clog2(NrWordsPerVector)) + 2*mrd_cnt_q;
+          vreg_addr_d[1] = (spatz_req.vd << $clog2(NrWordsPerVector)) + 2*mrd_cnt_q + 1;
           vrf_raddr_o = vreg_addr_d;
         end
        default:;
@@ -1395,13 +1406,13 @@ module spatz_vfu
     vreg_we    = '0;
 
     unique case(operand_state_q)
-      READ_V0_t: vreg_r_req = 3'b011;
-      READ_VD_t: vreg_r_req = 3'b011;
+      READ_V0_t: vreg_r_req = {1'b0, mrd_hi, 1'b1};
+      READ_VD_t: vreg_r_req = {1'b0, mrd_hi, 1'b1};
       READ_OPERANDS: begin
         if (switch_to_read_v0t) begin
           vreg_r_req = '0;  // avoid unuseful read
         end
-        else if(reduction_state_q == Reduction_Read_V0_t) vreg_r_req = 3'b011;
+        else if(reduction_state_q == Reduction_Read_V0_t) vreg_r_req = {1'b0, mrd_hi, 1'b1};
         else
           if (spatz_req_valid && vl_q < spatz_req.vl)
             vreg_r_req = {spatz_req.vd_is_src, spatz_req.use_vs1 && reduction_operand_request[1], spatz_req.use_vs2 && reduction_operand_request[0]};
@@ -1412,7 +1423,7 @@ module spatz_vfu
     if (fu_word_complete && !result_tag.reduction) begin
       vreg_we  = !result_tag.wb;
       if (result_tag.is_cmp) begin
-        vreg_we    = result_tag.last;
+        vreg_we    = cmp_mw_full;
       end
     end
 
@@ -1461,7 +1472,7 @@ always_comb begin : vreg_wbe_proc
       if (result_tag.is_cmp) begin
         // every vector element requires 1 bit of wbe --> ceil(vl/8)
         automatic logic [$clog2((MAXVL+7)/8+1)-1:0] mask_bytes;
-        mask_bytes = (result_tag.vl + 7) >> 3;
+        mask_bytes = ((result_tag.vl + 7) >> 3) - cmp_mw_idx * VRFWordBWidth;
         vreg_wbe   = (mask_bytes >= N_FU*ELENB) ? '1 : vrf_be_t'((vrf_be_t'(1) << mask_bytes) - 1);
       end else if(!result_tag.vm && !result_tag.is_merge && !spatz_req.op_arith.is_scalar && !result_tag.narrowing) begin //masking the wb results
         unique case (sew_wb) // add widening support
@@ -1556,25 +1567,25 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
         EW_8: begin
           for (int i = 0; i < VRFWordWidth/8; i++) begin
             v0_bit = (result_tag.vm) ? 1'b1 : operand_v0_t_q[i + (VRFWordWidth/8)*word_idx_q];
-            vreg_wdata[i + (VRFWordWidth/8)*word_idx_q] = result[i*8] & v0_bit;
+            vreg_wdata[i + (VRFWordWidth/8)*cmp_slot]   = result[i*8] & v0_bit;
           end
         end
         EW_16: begin
           for (int i = 0; i < VRFWordWidth/16; i++) begin
             v0_bit = (result_tag.vm) ? 1'b1 : operand_v0_t_q[i + (VRFWordWidth/16)*word_idx_q];
-            vreg_wdata[i + (VRFWordWidth/16)*word_idx_q] = result[i*16] & v0_bit;
+            vreg_wdata[i + (VRFWordWidth/16)*cmp_slot] = result[i*16] & v0_bit;
           end
         end
         EW_32: begin
           for (int i = 0; i < VRFWordWidth/32; i++) begin
             v0_bit = (result_tag.vm) ? 1'b1 : operand_v0_t_q[i + (VRFWordWidth/32)*word_idx_q];
-            vreg_wdata[i + (VRFWordWidth/32)*word_idx_q] = result[i*32] & v0_bit;
+            vreg_wdata[i + (VRFWordWidth/32)*cmp_slot] = result[i*32] & v0_bit;
           end
         end
         EW_64: begin
           for (int i = 0; i < VRFWordWidth/64; i++) begin
             v0_bit = (result_tag.vm) ? 1'b1 : operand_v0_t_q[i + (VRFWordWidth/64)*word_idx_q];
-            vreg_wdata[i + (VRFWordWidth/64)*word_idx_q] = result[i*64] & v0_bit;
+            vreg_wdata[i + (VRFWordWidth/64)*cmp_slot] = result[i*64] & v0_bit;
           end
         end
         default:;
@@ -1585,7 +1596,7 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
   always_comb begin : wdata_proc
     wdata_d = wdata_q;
     if (vfcmp_result_accepted) begin
-      if (result_tag.last)
+      if (cmp_mw_full)
         wdata_d = '0;
       else
         wdata_d = wdata_q | vreg_wdata;
@@ -1602,8 +1613,11 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
     if (result_tag.is_cmp) begin
       if(result_tag.vm)
         vrf_wdata_o = wdata_q | vreg_wdata;
-      else
-        vrf_wdata_o = ((wdata_q | vreg_wdata) & operand_v0_t_q) | (cmp_dst_inactive & ~operand_v0_t_q);
+      else begin
+        automatic logic [VRFWordWidth-1:0] v0_w  = operand_v0_t_q  [cmp_mw_idx*VRFWordWidth +: VRFWordWidth];
+        automatic logic [VRFWordWidth-1:0] old_w = cmp_dst_inactive[cmp_mw_idx*VRFWordWidth +: VRFWordWidth];
+        vrf_wdata_o = ((wdata_q | vreg_wdata) & v0_w) | (old_w & ~v0_w);
+      end
     end else begin
       vrf_wdata_o = vreg_wdata;
     end

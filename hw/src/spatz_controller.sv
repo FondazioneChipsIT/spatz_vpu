@@ -268,13 +268,19 @@ module spatz_controller
   // Buffer state signals
   logic       req_buffer_ready, req_buffer_valid, req_buffer_pop;
 
+  // Check if the current instruction has an illegal vstart value
+  logic vstart_illegal;
+  assign vstart_illegal = (decoder_rsp.spatz_req.ex_unit inside {VFU, SLD})
+                              && !decoder_rsp.spatz_req.op_arith.is_scalar   // vmv.x.s / vfmv.f.s ignore vstart
+                              && (vstart_d != '0);
+
   // Illegal flag of the instruction being decoded this cycle (known before the buffer)
   logic decoder_rsp_illegal;
   `ifdef VENTAGLIO
     assign spatz_req_vtl_illegal = !vtl_en_q && decoder_rsp.spatz_req.op_vtl.use_vtl;
-    assign decoder_rsp_illegal   = decoder_rsp_valid && (decoder_rsp.instr_illegal || spatz_req_vtl_illegal);
+    assign decoder_rsp_illegal   = decoder_rsp_valid && (decoder_rsp.instr_illegal || spatz_req_vtl_illegal || vstart_illegal);
   `else
-    assign decoder_rsp_illegal   = decoder_rsp_valid && decoder_rsp.instr_illegal;
+    assign decoder_rsp_illegal   = decoder_rsp_valid && (decoder_rsp.instr_illegal || vstart_illegal);
   `endif
 
   // One element wide instruction buffer
