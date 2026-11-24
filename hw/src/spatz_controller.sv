@@ -302,7 +302,9 @@ module spatz_controller
   // vl != 0 as seen by the issue guards, independent of spatz_req_valid:
   // in every branch of ex_issue the issued vl is zero only if vl_q is zero (scalar ops force vl = 1)
   logic issue_vl_nz;
-  assign issue_vl_nz = (vl_q != '0) || (buffer_spatz_req.op_arith.is_scalar && (buffer_spatz_req.ex_unit inside {VFU, SLD}));
+  // Scalar VSLDU moves (vmv.s.x / vfmv.s.f) are issued with vl = 0 (no-op) when vstart >= vl
+  assign issue_vl_nz = (buffer_spatz_req.op_arith.is_scalar && buffer_spatz_req.ex_unit == SLD) ? (vstart_q == '0 && vl_q != '0) :
+                       (vl_q != '0) || (buffer_spatz_req.op_arith.is_scalar && buffer_spatz_req.ex_unit == VFU);
 
   ////////////////
   // Scoreboard //
@@ -936,6 +938,8 @@ module spatz_controller
                            (VTL_cfg_q.sp_cfg_ratio == SP_RATIO_050) ? vl_q << 1 : vl_q;
             spatz_req.vd = (VTL_cfg_q.sp_cfg_ratio == SP_RATIO_025) ? spatz_req.op_vtl.old_vd << 2 :
                            (VTL_cfg_q.sp_cfg_ratio == SP_RATIO_050) ? spatz_req.op_vtl.old_vd << 1 : spatz_req.op_vtl.old_vd;
+            spatz_req.vstart = (VTL_cfg_q.sp_cfg_ratio == SP_RATIO_025) ? vstart_q << 2 :
+                               (VTL_cfg_q.sp_cfg_ratio == SP_RATIO_050) ? vstart_q << 1 : vstart_q;
           end
 `endif
         end
@@ -946,9 +950,9 @@ module spatz_controller
           spatz_req.vl     = vl_q;
           spatz_req.vstart = vstart_q;
 
-          // Is this a scalar request?
+          // RVV 1.0: if vstart >= vl, no operation is performed and vd is not updated.
           if (spatz_req.op_arith.is_scalar) begin
-            spatz_req.vl     = 1;
+            spatz_req.vl     = (vstart_q == '0 && vl_q != '0) ? 1 : 0;
             spatz_req.vstart = '0;
           end
         end

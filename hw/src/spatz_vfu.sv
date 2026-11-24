@@ -54,7 +54,6 @@ module spatz_vfu
     spatz_id_t id;
 
     vew_e vsew;
-    vlen_t vstart;
 
     // Encodes both the scalar RD and the VD address in the VRF
     vfu_rsp_addr_t vd_addr;
@@ -157,10 +156,6 @@ module spatz_vfu
   logic result_buf_valid_d, result_buf_valid_q;
 
   assign result_tag = result_buf_valid_q ? result_buf_tag_q : (state_q == VFU_RunningIPU ? ipu_result_tag : fpu_result_tag);
-
-  // Number of words advanced by vstart
-  vlen_t vstart;
-  assign vstart = ((spatz_req.vstart / N_FU) >> (MAXEW - spatz_req.vtype.vsew)) << (MAXEW - spatz_req.vtype.vsew);
 
   // Should we stall?
   logic stall;
@@ -375,8 +370,6 @@ module spatz_vfu
     end
     // Do we have a new instruction?
     else if (spatz_req_valid && !running_d[spatz_req.id]) begin
-      // Start at vstart
-      vl_d                    = vstart;
       busy_d                  = 1'b1;
       running_d[spatz_req.id] = 1'b1;
 
@@ -1336,7 +1329,6 @@ module spatz_vfu
     input_tag = '{
       id             : spatz_req.id,
       vsew           : spatz_req.vtype.vsew,
-      vstart         : spatz_req.vstart,
       vd_addr        : spatz_req.op_arith.is_scalar ? vfu_rsp_addr_t'(spatz_req.rd) : vfu_rsp_addr_t'(vreg_addr_q[2]),
       wb             : spatz_req.op_arith.is_scalar,
       last           : last_request,
@@ -1364,9 +1356,9 @@ module spatz_vfu
         else begin
 
           if (spatz_req_valid && vl_q == '0) begin
-            vreg_addr_d[0] = (spatz_req.vs2 + vstart) << $clog2(NrWordsPerVector);
-            vreg_addr_d[1] = (spatz_req.vs1 + vstart) << $clog2(NrWordsPerVector);
-            vreg_addr_d[2] = (spatz_req.vd + vstart) << $clog2(NrWordsPerVector);
+            vreg_addr_d[0] = (spatz_req.vs2) << $clog2(NrWordsPerVector);
+            vreg_addr_d[1] = (spatz_req.vs1) << $clog2(NrWordsPerVector);
+            vreg_addr_d[2] = (spatz_req.vd) << $clog2(NrWordsPerVector);
 
           // Direct feedthrough
           vrf_raddr_o = vreg_addr_d;
