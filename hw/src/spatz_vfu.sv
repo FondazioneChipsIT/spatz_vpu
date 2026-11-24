@@ -1142,6 +1142,17 @@ module spatz_vfu
             reduction_state_d = Reduction_IntraLane;
             reduction_pointer_d = '0;
           end
+        end else if (result_valid[0]) begin
+          // VRF read stalled while a partial result is coming out of the FU.
+          // Do not drop it: recirculate it, paired with the neutral element.
+          unique case (spatz_req.vtype.vsew)
+            EW_8 :   reduction_d[1] = {N_FU*(ELEN/8){reduction_neutral_value[7:0]}};
+            EW_16:   reduction_d[1] = {N_FU*(ELEN/16){reduction_neutral_value[15:0]}};
+            EW_32:   reduction_d[1] = {N_FU*(ELEN/32){reduction_neutral_value[31:0]}};
+            default: reduction_d[1] = {N_FU{reduction_neutral_value}};
+          endcase
+          reduction_operand_ready_d = 1'b1;
+          result_ready              = 1'b1;
         end
       end
 
