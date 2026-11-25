@@ -1374,11 +1374,7 @@ module spatz_vlsu
                 default: data = data;
               endcase
 
-          if (commit_insn_q.is_ordered && port == 0) begin
-            vrf_req_d.wdata[ELEN * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) +: ELEN] = data;
-          end else begin
-            vrf_req_d.wdata[ELEN*port +: ELEN] = data;
-          end
+          vrf_req_d.wdata[ELEN*port +: ELEN] = data;
 
           // Create write byte enable mask for register file
           if (commit_counter_en[port])
@@ -1392,22 +1388,14 @@ module spatz_vlsu
                 default: mask = '1;
               endcase
 
-              if (commit_insn_q.is_ordered && port == 0) begin
-                load_wbe[ELENB * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) +: ELENB] = (mask << shift);
-              end else begin
-                load_wbe[ELENB*port +: ELENB] = (mask << shift);
-              end
+              load_wbe[ELENB*port +: ELENB] = (mask << shift);
 
               vm_wbe = vm_masking[commit_slice_base[port] +: VRFWordBWidth];
               vrf_req_d.wbe = load_wbe & vm_wbe;
             end
             else begin
               for (int unsigned k = 0; k < ELENB; k++) begin
-                if (commit_insn_q.is_ordered && port == 0) begin
-                  load_wbe[ELENB * ((active_commit_counter[0] >> $clog2(ELENB)) % NrMemPorts) + k] = (k < commit_counter_delta[port]);
-                end else begin
-                  load_wbe[ELENB*port+k] = (k < commit_counter_delta[port]);
-                end
+                load_wbe[ELENB*port+k] = (k < commit_counter_delta[port]);
                 vrf_req_d.wbe = load_wbe & (commit_insn_q.vm ? {VRFWordBWidth{1'b1}} : vm_masking[commit_slice_base[port] +: VRFWordBWidth]);
               end
             end

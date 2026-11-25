@@ -1551,11 +1551,7 @@ module spatz_doublebw_vlsu
                   default: data = data;
                 endcase
 
-            if (commit_insn_q.is_ordered && intf == 0 && fu == 0) begin
-              vrf_req_d[intf].wdata[ELEN * ((active_commit_counter[0][0] >> $clog2(ELENB)) % N_FU) +: ELEN] = data;
-            end else begin
-              vrf_req_d[intf].wdata[ELEN*fu +: ELEN] = data;
-            end
+            vrf_req_d[intf].wdata[ELEN*fu +: ELEN] = data;
 
             // Create write byte enable mask for register file
             if (commit_counter_en[intf][fu])
@@ -1569,19 +1565,11 @@ module spatz_doublebw_vlsu
                   default: mask = '1;
                 endcase
 
-                if (commit_insn_q.is_ordered && intf == 0 && fu == 0) begin
-                  load_wbe[intf][ELENB * ((active_commit_counter[0][0] >> $clog2(ELENB)) % N_FU) +: ELENB] = (mask << shift);
-                end else begin
-                  load_wbe[intf][ELENB*fu +: ELENB] = (mask << shift);
-                end
+                load_wbe[intf][ELENB*fu +: ELENB] = (mask << shift);
 
               end else begin
                 for (int unsigned k = 0; k < ELENB; k++) begin
-                  if (commit_insn_q.is_ordered && intf == 0 && fu == 0) begin
-                    load_wbe[intf][ELENB * ((active_commit_counter[0][0] >> $clog2(ELENB)) % N_FU) + k] = (k < commit_counter_delta[intf][fu]);
-                  end else begin
-                    load_wbe[intf][ELENB*fu+k] = (k < commit_counter_delta[intf][fu]);
-                  end
+                  load_wbe[intf][ELENB*fu+k] = (k < commit_counter_delta[intf][fu]);
                 end
               end
           end
