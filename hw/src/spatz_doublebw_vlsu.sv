@@ -962,7 +962,7 @@ module spatz_doublebw_vlsu
                              ((intf==0) ? coalesce_commit[0] & (vrf_commit_bypass | vrf_commit_waiting_q[1]) & vlsu_buf_empty_i : 1'b0)) &
                             ((intf==1) ? (vrf_wvalid_i[0] & (coalesce_q[1].rsp.id == coalesce_q[0].rsp.id)) : 1'b1) &
                             !vlsu_buf_full_i;
-    assign vrf_id_o[intf] = {coalesce_q[intf].rsp.id, mem_spatz_req.id, commit_insn_q.id};
+    assign vrf_id_o[intf] = {coalesce_q[intf].rsp.id, (state_q == VLSU_ReadingV0_t) ? commit_insn_q.id : mem_spatz_req.id, commit_insn_q.id};
     // The spill register may be popped when the coalescing buffer can accept:
     //   - buffer is empty, OR
     //   - buffer is still accumulating (not yet commit-ready), OR
@@ -1152,22 +1152,26 @@ module spatz_doublebw_vlsu
       always_comb begin
 
         if (commit_insn_q.is_ordered) begin
-          if (intf == 0 && fu == 0) begin
-            max_bytes = commit_insn_q.vl;
-            commit_counter_en[intf][fu] = commit_operation_valid[intf][fu] && (commit_insn_q.is_load && vrf_req_valid_d[intf] && vrf_req_ready_d[intf]) || (!commit_insn_q.is_load && vrf_rvalid_i[intf][0] && vrf_re_o[intf][0] && (!mem_is_indexed || idx_valid[intf]));
-          end else begin
-            max_bytes = '0;
-            commit_counter_en[intf][fu] = 1'b0;
-          end
+          max_bytes = (intf == 0 && fu == 0) ? commit_insn_q.vl : '0;
         end else begin
           max_bytes = (commit_local_vl[intf] >> $clog2(N_FU*ELENB)) << $clog2(ELENB);
           if (commit_local_vl[intf][$clog2(ELENB) +: $clog2(N_FU)] > fu)
             max_bytes += ELENB;
           else if (commit_local_vl[intf][$clog2(ELENB) +: $clog2(N_FU)] == fu)
             max_bytes += commit_local_vl[intf][$clog2(ELENB)-1:0];
-
-          commit_counter_en[intf][fu] = commit_operation_valid[intf][fu] && (commit_insn_q.is_load && vrf_req_valid_d[intf] && vrf_req_ready_d[intf]) || (!commit_insn_q.is_load && vrf_rvalid_i[intf][0] && vrf_re_o[intf][0] && (!mem_is_indexed || idx_valid[intf]));
         end
+
+        commit_operation_valid[intf][fu] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore) && commit_insn_valid && !commit_insn_start && (active_commit_counter[intf][fu] != max_bytes) && (catchup[intf][fu] || (!catchup[intf][fu] && ~|catchup));
+        commit_operation_last[intf][fu]  = commit_operation_valid[intf][fu] && ((max_bytes - active_commit_counter[intf][fu]) <= (commit_is_single_element_operation ? commit_single_element_size : ELENB));
+        commit_counter_delta[intf][fu]   = !commit_operation_valid[intf][fu] ? vlen_t'('d0) : commit_is_single_element_operation ? vlen_t'(commit_single_element_size) : commit_operation_last[intf][fu] ? (max_bytes - active_commit_counter[intf][fu]) : vlen_t'(ELENB);
+        commit_counter_max[intf][fu]     = max_bytes;
+
+        if (commit_insn_q.is_ordered && (intf != 0 || fu != 0))
+          commit_counter_en[intf][fu] = 1'b0;
+        else
+          commit_counter_en[intf][fu] = commit_operation_valid[intf][fu] &&
+                                  ((commit_insn_q.is_load && vrf_req_valid_d[intf] && vrf_req_ready_d[intf]) ||
+                                  (!commit_insn_q.is_load && vrf_rvalid_i[intf][0] && vrf_re_o[intf][0] && (!mem_is_indexed || idx_valid[intf])));
 
         // reset commit counter for the next segment
         commit_counter_load[intf][fu] = commit_insn_start || seg_completed;
@@ -1176,10 +1180,6 @@ module spatz_doublebw_vlsu
           commit_counter_d[intf][fu] += ELENB;
         else if (commit_local_vstart[intf][$clog2(ELENB) +: $clog2(N_FU)] == fu)
           commit_counter_d[intf][fu] += commit_local_vstart[intf][$clog2(ELENB)-1:0];
-        commit_operation_valid[intf][fu] = (state_q == VLSU_RunningLoad || state_q == VLSU_RunningStore) && commit_insn_valid && !commit_insn_start && (active_commit_counter[intf][fu] != max_bytes) && (catchup[intf][fu] || (!catchup[intf][fu] && ~|catchup));
-        commit_operation_last[intf][fu]  = commit_operation_valid[intf][fu] && ((max_bytes - active_commit_counter[intf][fu]) <= (commit_is_single_element_operation ? commit_single_element_size : ELENB));
-        commit_counter_delta[intf][fu]   = !commit_operation_valid[intf][fu] ? vlen_t'('d0) : commit_is_single_element_operation ? vlen_t'(commit_single_element_size) : commit_operation_last[intf][fu] ? (max_bytes - active_commit_counter[intf][fu]) : vlen_t'(ELENB);
-        commit_counter_max[intf][fu]     = max_bytes;
       end
     end
   end
