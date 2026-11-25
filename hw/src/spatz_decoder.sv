@@ -96,6 +96,10 @@ module spatz_decoder
         riscv_instr::VLE16_V,
         riscv_instr::VLE32_V,
         riscv_instr::VLE64_V,
+        riscv_instr::VLE8FF_V,
+        riscv_instr::VLE16FF_V,
+        riscv_instr::VLE32FF_V,
+        riscv_instr::VLE64FF_V,
         riscv_instr::VL1RE8_V,
         riscv_instr::VL1RE16_V,
         riscv_instr::VL1RE32_V,
@@ -180,7 +184,11 @@ module spatz_decoder
             riscv_instr::VLE8_V,
             riscv_instr::VLE16_V,
             riscv_instr::VLE32_V,
-            riscv_instr::VLE64_V: begin
+            riscv_instr::VLE64_V,
+            riscv_instr::VLE8FF_V,
+            riscv_instr::VLE16FF_V,
+            riscv_instr::VLE32FF_V,
+            riscv_instr::VLE64FF_V: begin
               if (ls_nf == 3'b000) begin
                 spatz_req.op             = VLE;
                 spatz_req.op_mem.is_load = 1'b1;

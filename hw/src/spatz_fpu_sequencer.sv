@@ -595,6 +595,7 @@ module spatz_fpu_sequencer
   logic is_vector_load;
   assign is_vector_load = issue_req_i.data_op inside
     {riscv_instr::VLE8_V, riscv_instr::VLE16_V, riscv_instr::VLE32_V, riscv_instr::VLE64_V,
+    riscv_instr::VLE8FF_V, riscv_instr::VLE16FF_V, riscv_instr::VLE32FF_V, riscv_instr::VLE64FF_V,
     riscv_instr::VLX8_V, riscv_instr::VLX16_V, riscv_instr::VLX32_V, riscv_instr::VLX64_V,
     riscv_instr::VLSE8_V, riscv_instr::VLSE16_V, riscv_instr::VLSE32_V, riscv_instr::VLSE64_V,
     riscv_instr::VL1RE8_V, riscv_instr::VL1RE16_V, riscv_instr::VL1RE32_V, riscv_instr::VL1RE64_V,
