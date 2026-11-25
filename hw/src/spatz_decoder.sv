@@ -1170,6 +1170,7 @@ module spatz_decoder
         riscv_instr::VFSQRT_V,
         riscv_instr::VFDIV_VV,
         riscv_instr::VFDIV_VF,
+        riscv_instr::VFRDIV_VF,
         riscv_instr::VFADD_VV,
         riscv_instr::VFADD_VF,
         riscv_instr::VFSUB_VV,
@@ -1292,6 +1293,14 @@ module spatz_decoder
               riscv_instr::VFDIV_VV,
               riscv_instr::VFDIV_VF: begin
                 spatz_req.op = VFDIV;
+              end
+
+              riscv_instr::VFRDIV_VF: begin
+                spatz_req.op      = VFDIV;
+                spatz_req.use_vs1 = 1'b0;
+                spatz_req.use_vs2 = 1'b1;
+                spatz_req.rs1     = decoder_req_i.rs1;
+                spatz_req.vs2     = arith_s2;
               end
 
               riscv_instr::VFSQRT_V: begin
