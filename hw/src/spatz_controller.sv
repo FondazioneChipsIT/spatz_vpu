@@ -268,11 +268,15 @@ module spatz_controller
   // Buffer state signals
   logic       req_buffer_ready, req_buffer_valid, req_buffer_pop;
 
+  // Program-order vstart, updated when an instruction is accepted at decode.
+  vlen_t vstart_dec_d, vstart_dec_q;
+  `FF(vstart_dec_q, vstart_dec_d, '0)
+
   // Check if the current instruction has an illegal vstart value
   logic vstart_illegal;
   assign vstart_illegal = (decoder_rsp.spatz_req.ex_unit inside {VFU, SLD})
                               && !decoder_rsp.spatz_req.op_arith.is_scalar   // vmv.x.s / vfmv.f.s ignore vstart
-                              && (vstart_d != '0);
+                              && (vstart_dec_q != '0);
 
   // Illegal flag of the instruction being decoded this cycle (known before the buffer)
   logic decoder_rsp_illegal;
@@ -282,6 +286,22 @@ module spatz_controller
   `else
     assign decoder_rsp_illegal   = decoder_rsp_valid && (decoder_rsp.instr_illegal || vstart_illegal);
   `endif
+
+  always_comb begin : proc_vstart_dec
+    vstart_dec_d = vstart_dec_q;
+    if (decoder_rsp_valid && !decoder_rsp_illegal) begin
+      if (decoder_rsp.spatz_req.op_cfg.reset_vstart)
+        vstart_dec_d = '0;
+      if (decoder_rsp.spatz_req.op == VCSR) begin
+        if (decoder_rsp.spatz_req.op_cfg.write_vstart)
+          vstart_dec_d = vlen_t'(decoder_rsp.spatz_req.rs1);
+        else if (decoder_rsp.spatz_req.op_cfg.set_vstart)
+          vstart_dec_d = vstart_dec_q |  vlen_t'(decoder_rsp.spatz_req.rs1);
+        else if (decoder_rsp.spatz_req.op_cfg.clear_vstart)
+          vstart_dec_d = vstart_dec_q & ~vlen_t'(decoder_rsp.spatz_req.rs1);
+      end
+    end
+  end
 
   // One element wide instruction buffer
   fall_through_register #(
