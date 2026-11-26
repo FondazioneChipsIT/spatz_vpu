@@ -2018,7 +2018,8 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
       fpnew_top #(
         .Features                   (FPUFeatures           ),
         .Implementation             (FPUImpl               ),
-        .TagType                    (vfu_tag_t             )
+        .TagType                    (vfu_tag_t             ),
+        .TrueSIMDClass              (1                     )
       ) i_fpu (
         .clk_i         (clk_i                                                  ),
         .rst_ni        (rst_ni                                                 ),

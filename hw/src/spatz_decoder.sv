@@ -1168,6 +1168,8 @@ module spatz_decoder
 
         // Vector floating-point instructions
         riscv_instr::VFSQRT_V,
+        riscv_instr::VFCLASS_V,
+        riscv_instr::VFNCVT_ROD_F_F_W,
         riscv_instr::VFDIV_VV,
         riscv_instr::VFDIV_VF,
         riscv_instr::VFRDIV_VF,
@@ -1305,6 +1307,11 @@ module spatz_decoder
 
               riscv_instr::VFSQRT_V: begin
                 spatz_req.op = VFSQRT;
+                spatz_req.use_vs2 = 1'b0;
+              end
+              riscv_instr::VFCLASS_V: begin
+                spatz_req.op = VFCLASS;
+                spatz_req.use_vs2 = 1'b0;
               end
               riscv_instr::VFADD_VV,
               riscv_instr::VFADD_VF: spatz_req.op = VFADD;
@@ -1518,6 +1525,11 @@ module spatz_decoder
               riscv_instr::VFNCVT_F_F_W: begin
                 spatz_req.op                    = VF2F;
                 spatz_req.op_arith.is_narrowing = 1'b1;
+              end
+              riscv_instr::VFNCVT_ROD_F_F_W: begin
+                spatz_req.op                    = VF2F;
+                spatz_req.op_arith.is_narrowing = 1'b1;
+                spatz_req.rm                    = fpnew_pkg::ROD;
               end
 
               riscv_instr::VFMV_V_F,
@@ -2356,6 +2368,12 @@ module spatz_decoder
 
       // Check EMUL / NFIELDS legality for loads and stores (pre-computed in emul_pre_check)
       if (spatz_req.ex_unit == LSU && (spatz_req.nf != 0) && emul_illegal_cand)
+        illegal_instr = 1'b1;
+
+      // Widening/narrowing ops at SEW = ELEN would need a 2*ELEN-wide operand: reserved
+      if (spatz_req.ex_unit == VFU && !spatz_req.op_arith.is_scalar &&
+          (spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2) &&
+          decoder_req_i.vtype.vsew == MAXEW)
         illegal_instr = 1'b1;
 
       // Add correct reset_vstart value
