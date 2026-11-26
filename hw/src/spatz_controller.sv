@@ -780,7 +780,7 @@ module spatz_controller
       seg_writer_d[spatz_req.id] = spatz_req.ex_unit == LSU && spatz_req.op_mem.is_load && (nf_fields > 1);
 
       // Is this a risky instruction which should not chain?
-      if (spatz_req.op inside {VSLIDEUP, VSLIDEDOWN, VLSE, VLSEG, VLXE, VSSE, VSSEG, VSXE})
+      if (spatz_req.op inside {VSLIDEUP, VSLIDEDOWN, VLSE, VLSEG, VLXE, VSSE, VSSEG, VSXE} || (vstart_q != '0))
         scoreboard_d[spatz_req.id].prevent_chaining = 1'b1;
 
       // Is this a narrowing or widening instruction?
