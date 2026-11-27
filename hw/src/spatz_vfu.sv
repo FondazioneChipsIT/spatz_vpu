@@ -1562,6 +1562,10 @@ always_comb begin : vreg_wbe_proc
       end else if(result_tag.narrowing) begin
         if(!result_tag.vm && !spatz_req.op_arith.is_scalar) begin
           unique case (sew_wb)
+            EW_8:for(int i=0;i<VRFWordBWidth;i=i+1)begin
+              vreg_wbe_pre[i] = operand_v0_t_q[vreg_wb_word_cnt_q * VRFWordBWidth + i];
+              vreg_wbe = result_tag.narrowing_upper ? {vreg_wbe_pre[N_FU*ELENB-1:(N_FU*ELENB/2)],{(N_FU*ELENB/2){1'b0}}} : {{(N_FU*ELENB/2){1'b0}}, vreg_wbe_pre[(N_FU*ELENB/2)-1:0]};
+            end
             EW_16:for(int i=0;i<VRFWordBWidth/2;i=i+1)begin
               vreg_wbe_pre[i*2+:2] = {2{operand_v0_t_q[vreg_wb_word_cnt_q * (VRFWordBWidth/2) + i]}};
               vreg_wbe = result_tag.narrowing_upper ? {vreg_wbe_pre[N_FU*ELENB-1:(N_FU*ELENB/2)],{(N_FU*ELENB/2){1'b0}}} : {{(N_FU*ELENB/2){1'b0}}, vreg_wbe_pre[(N_FU*ELENB/2)-1:0]};
@@ -1615,18 +1619,36 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
     vreg_wdata = result_buf_valid_q ? result_buf_q : result;
 
     if (result_tag.narrowing) begin
-      unique case (MAXEW)
-        EW_64: begin
-          if (RVD)
-            for (int element = 0; element < N_FU; element++)
+      if (state_q == VFU_RunningIPU) begin
+        unique case (result_tag.vsew)
+          EW_32: begin
+            for (int element = 0; element < (MAXEW == EW_64 ? N_FU : N_FU/2); element++)
               vreg_wdata[32*element + (N_FU * ELEN * result_tag.narrowing_upper / 2) +: 32] = result[64*element +: 32];
-        end
-        EW_32: begin
-          for (int element = 0; element < (MAXEW == EW_64 ? N_FU*2 : N_FU); element++)
-            vreg_wdata[16*element + (N_FU * ELEN * result_tag.narrowing_upper / 2) +: 16] = result[32*element +: 16];
-        end
-        default:;
-      endcase
+          end
+          EW_16: begin
+            for (int element = 0; element < (MAXEW == EW_64 ? N_FU*2 : N_FU); element++)
+              vreg_wdata[16*element + (N_FU * ELEN * result_tag.narrowing_upper / 2) +: 16] = result[32*element +: 16];
+          end
+          EW_8: begin
+            for (int element = 0; element < (MAXEW == EW_64 ? N_FU*4 : N_FU*2); element++)
+              vreg_wdata[8*element + (N_FU * ELEN * result_tag.narrowing_upper / 2) +: 8] = result[16*element +: 8];
+          end
+          default:;
+        endcase
+      end else begin
+        unique case (MAXEW)
+          EW_64: begin
+            if (RVD)
+              for (int element = 0; element < N_FU; element++)
+                vreg_wdata[32*element + (N_FU * ELEN * result_tag.narrowing_upper / 2) +: 32] = result[64*element +: 32];
+          end
+          EW_32: begin
+            for (int element = 0; element < (MAXEW == EW_64 ? N_FU*2 : N_FU); element++)
+              vreg_wdata[16*element + (N_FU * ELEN * result_tag.narrowing_upper / 2) +: 16] = result[32*element +: 16];
+          end
+          default:;
+        endcase
+      end
 
     end else if (result_tag.is_cmp) begin
       automatic logic v0_bit;
@@ -1869,9 +1891,11 @@ assign vfcmp_result_accepted = result_tag.is_cmp && fu_word_complete && result_r
 
     logic is_widening;
     assign is_widening = spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2;
+    logic is_narrowing;
+    assign is_narrowing = spatz_req.op_arith.is_narrowing;
 
     vew_e sew;
-    assign sew = vew_e'(int'(spatz_req.vtype.vsew) + is_widening);
+    assign sew = vew_e'(int'(spatz_req.vtype.vsew) + is_widening + is_narrowing);
 
     spatz_ipu #(
       .tag_t(vfu_tag_t)

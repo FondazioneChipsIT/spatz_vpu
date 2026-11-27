@@ -496,9 +496,13 @@ module spatz_decoder
         riscv_instr::VSRL_VV,
         riscv_instr::VSRL_VX,
         riscv_instr::VSRL_VI,
+        riscv_instr::VNSRL_WX,
+        riscv_instr::VNSRL_WI,
         riscv_instr::VSRA_VV,
         riscv_instr::VSRA_VX,
         riscv_instr::VSRA_VI,
+        riscv_instr::VNSRA_WX,
+        riscv_instr::VNSRA_WI,
         riscv_instr::VMIN_VV,
         riscv_instr::VMIN_VX,
         riscv_instr::VMINU_VV,
@@ -594,6 +598,7 @@ module spatz_decoder
         riscv_instr::VSLIDEDOWN_VX,
         riscv_instr::VSLIDEDOWN_VI,
         riscv_instr::VSLIDE1DOWN_VX: begin
+          automatic logic [5:0] funct6    = decoder_req_i.instr[31:26];
           automatic opcodev_func3_e func3 = opcodev_func3_e'(decoder_req_i.instr[14:12]);
           automatic vreg_t arith_s1       = decoder_req_i.instr[19:15];
           automatic vreg_t arith_s2       = decoder_req_i.instr[24:20];
@@ -839,19 +844,31 @@ module spatz_decoder
 
             riscv_instr::VSRL_VV,
             riscv_instr::VSRL_VX,
-            riscv_instr::VSRL_VI: begin
+            riscv_instr::VSRL_VI,
+            riscv_instr::VNSRL_WX,
+            riscv_instr::VNSRL_WI: begin
               spatz_req.op = VSRL;
               if (func3 == OPIVI) begin
                 spatz_req.rs1 = elen_t'(arith_s1);
+              end
+              if (funct6 == 6'b101100) begin
+                spatz_req.op_arith.is_narrowing = 1'b1;
+                if (decoder_req_i.vtype.vlmul == LMUL_8) illegal_instr = 1'b1;
               end
             end
 
             riscv_instr::VSRA_VV,
             riscv_instr::VSRA_VX,
-            riscv_instr::VSRA_VI: begin
+            riscv_instr::VSRA_VI,
+            riscv_instr::VNSRA_WX,
+            riscv_instr::VNSRA_WI: begin
               spatz_req.op = VSRA;
               if (func3 == OPIVI) begin
                 spatz_req.rs1 = elen_t'(arith_s1);
+              end
+              if (funct6 == 6'b101101) begin
+                spatz_req.op_arith.is_narrowing = 1'b1;
+                if (decoder_req_i.vtype.vlmul == LMUL_8) illegal_instr = 1'b1;
               end
             end
 
