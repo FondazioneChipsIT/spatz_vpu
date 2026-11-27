@@ -857,7 +857,6 @@ module spatz_decoder
               end
               if (funct6 == 6'b101100) begin
                 spatz_req.op_arith.is_narrowing = 1'b1;
-                if (decoder_req_i.vtype.vlmul == LMUL_8) illegal_instr = 1'b1;
               end
             end
 
@@ -872,7 +871,6 @@ module spatz_decoder
               end
               if (funct6 == 6'b101101) begin
                 spatz_req.op_arith.is_narrowing = 1'b1;
-                if (decoder_req_i.vtype.vlmul == LMUL_8) illegal_instr = 1'b1;
               end
             end
 
@@ -2409,9 +2407,10 @@ module spatz_decoder
         illegal_instr = 1'b1;
 
       // Widening/narrowing ops at SEW = ELEN would need a 2*ELEN-wide operand: reserved
+      // At LMUL=8, the wide operand would need EMUL=16, which is reserved
       if (spatz_req.ex_unit == VFU && !spatz_req.op_arith.is_scalar &&
           (spatz_req.op_arith.is_narrowing || spatz_req.op_arith.widen_vs1 || spatz_req.op_arith.widen_vs2) &&
-          decoder_req_i.vtype.vsew == MAXEW)
+          (decoder_req_i.vtype.vsew == MAXEW || decoder_req_i.vtype.vlmul == LMUL_8))
         illegal_instr = 1'b1;
 
       // Add correct reset_vstart value
