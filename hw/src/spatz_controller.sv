@@ -263,8 +263,15 @@ module spatz_controller
   // Request Buffer //
   ////////////////////
 
+  typedef struct packed {
+    logic [$bits(issue_req_i.id)-1:0] issue_id;
+    logic instr_illegal;
+    spatz_req_t spatz_req;
+  } req_buff_t;
   // Spatz request
   spatz_req_t buffer_spatz_req;
+  logic       buffer_instr_illegal;
+  logic [$bits(issue_req_i.id)-1:0] buffer_issue_id;
   // Buffer state signals
   logic       req_buffer_ready, req_buffer_valid, req_buffer_pop;
 
@@ -279,7 +286,7 @@ module spatz_controller
 
   // One element wide instruction buffer
   fall_through_register #(
-    .T(spatz_req_t)
+    .T(req_buff_t)
   ) i_req_buffer (
     .clk_i     (clk_i                                    ),
     .rst_ni    (rst_ni                                   ),
@@ -287,9 +294,9 @@ module spatz_controller
     .testmode_i(1'b0                                     ),
     .ready_o   (req_buffer_ready                         ),
     .valid_o   (req_buffer_valid                         ),
-    .data_i    (decoder_rsp.spatz_req                    ),
+    .data_i    ({issue_req_i.id, decoder_rsp.instr_illegal, decoder_rsp.spatz_req}),
     .valid_i   (decoder_rsp_valid && !decoder_rsp_illegal),
-    .data_o    (buffer_spatz_req                         ),
+    .data_o    ({buffer_issue_id, buffer_instr_illegal, buffer_spatz_req}),
     .ready_i   (req_buffer_pop                           )
   );
 
