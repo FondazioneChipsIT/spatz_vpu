@@ -296,7 +296,7 @@ module spatz_controller
   // vl != 0 as seen by the issue guards, independent of spatz_req_valid:
   // in every branch of ex_issue the issued vl is zero only if vl_q is zero (scalar ops force vl = 1)
   logic issue_vl_nz;
-  assign issue_vl_nz = (vl_q != '0) || (buffer_spatz_req.op_arith.is_scalar && (buffer_spatz_req.ex_unit inside {VFU, SLD}));
+  assign issue_vl_nz = (vl_q != '0) || (buffer_spatz_req.op_arith.is_scalar && (buffer_spatz_req.ex_unit inside {VFU, SLD})) || buffer_spatz_req.op_sld.whole_reg;
 
   // LSU ops whose EMUL is LMUL itself rather than (EEW/SEW)*LMUL:
   // indexed loads/stores (data EMUL = LMUL) and whole-register ops (EMUL = NREG, carried in vlmul)
@@ -954,7 +954,11 @@ module spatz_controller
         SLD: begin
           // Overwrite all csrs in request
           spatz_req.vtype  = vtype_q;
-          spatz_req.vl     = vl_q;
+          if (spatz_req.op_sld.whole_reg) begin
+            spatz_req.vl   = vlen_t'((VLENB << buffer_spatz_req.vtype.vlmul[1:0]) >> int'(spatz_req.vtype.vsew));
+            spatz_req.vtype.vlmul    = buffer_spatz_req.vtype.vlmul;
+          end else
+            spatz_req.vl   = vl_q;
           spatz_req.vstart = vstart_q;
 
           // Is this a scalar request?
@@ -1035,7 +1039,7 @@ module spatz_controller
           end
         end
         SLD: begin
-          if (vtype_q.vill) begin
+          if (vtype_q.vill && !decoder_rsp.spatz_req.op_sld.whole_reg) begin
             issue_rsp_o.accept = 1'b0;
             issue_rsp_o.exception = 1'b1;
           end

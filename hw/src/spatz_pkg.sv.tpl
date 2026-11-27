@@ -248,6 +248,7 @@ package spatz_pkg;
     logic vm;
     logic insert;
     logic vmv;
+    logic whole_reg;
   } op_sld_t;
 
   ////////////////////////////////////

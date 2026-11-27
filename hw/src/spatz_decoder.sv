@@ -588,6 +588,10 @@ module spatz_decoder
         riscv_instr::VMERGE_VXM,
         riscv_instr::VMERGE_VIM,
         riscv_instr::VMV_V_V,
+        riscv_instr::VMV1R_V,
+        riscv_instr::VMV2R_V,
+        riscv_instr::VMV4R_V,
+        riscv_instr::VMV8R_V,
         riscv_instr::VCOMPRESS_VM,
         riscv_instr::VMV_V_X,
         riscv_instr::VMV_V_I,
@@ -1085,6 +1089,23 @@ module spatz_decoder
               spatz_req.vs2                = spatz_req.vs1;
               spatz_req.use_vs2            = (func3 == OPIVV);
               spatz_req.op_arith.is_scalar = decoder_req_i.instr inside {riscv_instr::VMV_S_X};
+            end
+            
+            riscv_instr::VMV1R_V,
+            riscv_instr::VMV2R_V,
+            riscv_instr::VMV4R_V,
+            riscv_instr::VMV8R_V: begin
+              spatz_req.op                 = VSLIDEUP;
+              spatz_req.ex_unit            = SLD;
+              spatz_req.op_sld.insert      = 1'b0;
+              spatz_req.op_sld.vmv         = 1'b1;
+              spatz_req.op_sld.whole_reg   = 1'b1;
+              spatz_req.op_sld.vm          = 1'b1;
+              spatz_req.rs1                = 1'b0; // The vs1 field is NREG-1, not a slide amount
+              spatz_req.vtype.vlmul        = vlmul_e'(arith_s1 == 3'd7 ? LMUL_8 :
+                                                      arith_s1 == 3'd3 ? LMUL_4 :
+                                                      arith_s1 == 3'd1 ? LMUL_2 : LMUL_1);
+              if ((arith_d & arith_s1[2:0]) != 0 || (arith_s2 & arith_s1[2:0]) != 0) illegal_instr = 1'b1;
             end
 
             riscv_instr::VCOMPRESS_VM: begin
